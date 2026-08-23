@@ -21,3 +21,7 @@ this spec.
 Semver. A breaking change to any normative rule is a major bump, an additive/
 backward-compatible clarification is a minor bump, wording-only fixes are a patch
 bump. See `CHANGELOG.md`.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

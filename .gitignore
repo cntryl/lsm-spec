@@ -1,0 +1,19 @@
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment and tooling output
+.env
+.env.*
+*.log
+coverage/
+node_modules/
+tmp/
