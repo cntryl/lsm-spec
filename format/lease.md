@@ -19,11 +19,15 @@ This is distinct from, and does not replace, any OS-level advisory file lock
 (`flock`/`LockFileEx`): the record described here is a **persistent CAS-via-rename
 leader record**, not an OS lock, specifically so that leadership determination works
 correctly on filesystems where advisory locks are unreliable or unsupported (e.g.
-NFS, SMB/CIFS shared mounts). **TODO: verify** — whether an engine is additionally
-required to take *any* OS-level lock as a secondary defense-in-depth measure, or
-whether the leader record is intended to be the sole mechanism; the reference Rust
-implementation's history shows OS locks were used previously and were deliberately
-replaced by this record-based design.
+NFS, SMB/CIFS shared mounts). **Confirmed** against the Rust reference
+implementation: no OS-level lock is taken anywhere in the lease acquisition/renewal/
+release path today. `flock`/`LockFileEx` wrapper code still exists at the low-level
+I/O abstraction layer — a leftover from the previous, replaced design the doc
+comments there still describe — but it has zero call sites in the lease code or
+anywhere else in the codebase; it is dead code. The leader record is the sole
+mechanism in this implementation. This does not settle whether a *future*
+implementation is required to also take an OS lock as defense-in-depth — only that
+midge today does not.
 
 Both known implementations use this mechanism only for local/filesystem-backed
 databases. A cloud-backed deployment has an analogous lease concept implemented
@@ -46,8 +50,9 @@ that contains WAL, SST, and manifest state — not a subdirectory), as two files
   record, its presence outside the span of one mutation attempt is itself an anomaly
   (see §5.2).
 
-**TODO: verify** exact filenames as a cross-implementation format requirement versus
-implementation-specific convenience naming. The two known implementations agree on:
+**Confirmed** as a real cross-implementation requirement, directly verified against
+both reference implementations' source (not merely observed on disk): the two
+known implementations agree on:
 
 | File | Purpose |
 |---|---|
@@ -109,10 +114,20 @@ No other fields are defined. There is no magic number, version byte, or checksum
 field in the record itself (see §5.4 on corruption handling, which relies on
 whole-field parseability rather than a checksum).
 
-**TODO: verify** — field ordering (`epoch`, `holder_id`, `acquired_at`) and the exact
-separator (`": "`, i.e. colon-space) as a format requirement versus incidental writer
-behavior; both known implementations parse fields by prefix-matching each line
-independently and are tolerant of reordering, but always *write* them in this order.
+**Confirmed as a real cross-implementation format requirement, not incidental
+behavior**: both known implementations independently parse fields by scanning each
+line on its own — tolerant of any field order on read — but always *write* them in
+exactly `epoch`, `holder_id`, `acquired_at` order with a `": "` (colon-space)
+separator. Verified directly against both reference implementations' source: the
+Rust engine's writer (`format_leader_record`) and the C# engine's writer
+(`MidgeFileLease.WriteRecord`) both produce the byte-identical line format
+`epoch: {epoch}\nholder_id: {holder_id}\nacquired_at: {acquired_at}\n`. Two
+independently-built implementations agreeing on both field order and separator,
+despite the reader being order-tolerant either way, is what elevates this from
+"one implementation's incidental writer behavior" to an actual interop contract — a
+third implementation should reproduce this exact write order/separator to remain
+maximally compatible with tooling that might parse the file positionally, even
+though a spec-compliant reader must not require it.
 
 ### 3.2 Holder identity
 
@@ -126,8 +141,16 @@ and for operator-facing diagnostics. No parser may assume any internal structure
 
 ### 3.3 The acquisition/mutation lock file
 
-The `.lock` file is also UTF-8 text, using the same `{field}: {value}`-style line
-format (informally; not reusing the leader record's three fields). Observed content:
+The `.lock` file is also UTF-8 text, using a `{field}={value}`-style line format
+(not reusing the leader record's three fields — and, **confirmed identical across
+both reference implementations, not the leader record's `": "`-separated style
+either**: the Rust engine writes
+`holder_id={holder_id}\nowner_token={owner_token}\ncreated_at={created_at}\n`, and
+the C# engine's `AcquireMutationLock` independently produces the exact same
+`holder_id={...}\nowner_token={...}\ncreated_at={...}\n` shape — a bare `=` with no
+space, distinct from the leader record's `": "` separator in §3.1. Two
+independently-built implementations agreeing on this is strong evidence it's the
+deliberate shared contract, not one engine's incidental choice). Observed content:
 
 | Field | Type | Description |
 |---|---|---|
@@ -159,10 +182,53 @@ current leader record followed by a durable write of a new one:
    - If the age is at or beyond the staleness threshold, the acquisition may proceed
      (a "takeover" of a presumed-dead holder).
 4. Compute the new epoch as `max(current epoch, any caller-supplied minimum) + 1`.
-   Both known implementations expose a caller-supplied minimum, used by a recovering
-   engine to ensure its own newly issued epoch outranks anything it observed during
-   log/manifest replay, not only the epoch in the leader record itself. Reaching
+   **A conforming acquisition implementation MUST support this caller-supplied
+   minimum, and a recovering engine MUST supply it, computed from its own
+   WAL/manifest recovery pass, before treating itself as open for new writes.**
+   This is not an optional convenience parameter: it is what guarantees the epoch
+   this acquisition grants is higher than every epoch value that could already be
+   durable in this engine's own on-disk state (WAL records the engine is about to
+   replay, or has already replayed) — the single property fencing (§6) depends on.
+   Without it, an acquisition that only computes `current_lease_epoch + 1` can grant
+   an epoch that is *not* actually higher than epochs already present in this
+   engine's own WAL — e.g. if the leader record was lost/reset independently of the
+   WAL directory (restore from an old backup, manual recovery, directory migration)
+   — silently reintroducing exactly the kind of stale-writer ambiguity fencing
+   exists to prevent, on the *next* recovery pass rather than this one. Reaching
    `u64::MAX` fails the acquisition (**epoch exhausted**) rather than wrapping.
+
+   **Confirmed real and deliberate, not a spec artifact: the C# reference
+   implementation implements exactly this.** `MidgeFileLease.Acquire(root,
+   minimumEpoch, ...)` computes `Math.Max(current?.Epoch ?? 0, minimumEpoch) + 1` —
+   directly matching this step's formula — and `minimumEpoch` is threaded in from a
+   public `minimumWriterEpoch` parameter on the C# engine's top-level
+   `LocalDiskStore.Open(...)` API. This settles the earlier open question of
+   whether "both known implementations expose a caller-supplied minimum" was ever
+   true: it was, for the C# engine. **It is not true for midge.**
+
+   **Known gap in the reference implementation ("midge") — recommended fix:**
+   confirmed midge's `LeaderStore`/`PrimaryLease` acquisition APIs take no
+   equivalent epoch-floor parameter at all — not even the plumbing exists, let
+   alone anything that computes a value for it. Its lease acquisition also
+   completes in full *before* WAL replay runs, and WAL replay's own
+   `max_epoch_seen` output (`wal.md` §6.4 point 4) is never fed back into — or even
+   reachable from — acquisition. Recommended fix, matching the C# engine's actual
+   design: add an equivalent minimum-epoch parameter to midge's own
+   lease-acquisition / engine-open API surface, so a caller with out-of-band
+   knowledge of a higher epoch (an operator running disaster recovery, a
+   multi-replica coordinator, a migration tool) has a way to supply it — parity
+   with what the C# engine already exposes, not a novel design.
+
+   **One honest caveat, so this isn't overclaimed as "solved by the C# engine":**
+   the C# engine's own default is `minimumWriterEpoch = 0`, and its `Open()` also
+   acquires the lease *before* loading the manifest — so out of the box, with no
+   caller passing a non-default value, the C# engine is exposed to the exact same
+   hazard described above; it merely *can* be protected against, by a caller that
+   knows to use the parameter, in a way midge currently cannot be protected against
+   at all. Neither engine automatically closes this gap on its own; midge is simply
+   missing even the option. (The `u64::MAX` exhaustion behavior above is confirmed
+   correct in both engines — midge's `checked_add(1)` and the C# engine's explicit
+   `== ulong.MaxValue` check both fail closed rather than wrapping.)
 5. Write the new record — `{epoch: new_epoch, holder_id: this_process, acquired_at:
    now}` — via write-to-temp-file + fsync + atomic rename over the leader record path
    + fsync the containing directory. (This is the same staged-write pattern used
@@ -206,6 +272,30 @@ are format-invariant across every renewal within one lease lifetime — a compet
 reader can therefore always tell "same lease, still alive" (matching epoch, newer
 timestamp) apart from "lease changed hands" (different epoch and/or holder).
 
+**Known gap in the reference implementation ("midge") — recommended fix:** the
+fencing check §6 item 1 requires comparing *both* epoch and `holder_id` — a
+`holder_id` mismatch alone, even at an unchanged epoch, must mean superseded. Under
+this format's own epoch-CAS acquisition protocol (§4), two different holders should
+never legitimately share one epoch, so epoch-only comparison is not *known* to be
+exploitable through §4 alone — but the whole point of also checking `holder_id` is
+defense against exactly the cases §4 doesn't cover: a directly-tampered or
+externally-rewritten leader record, a bug in a *different*, non-conforming writer
+sharing the directory, or a defect in another conforming implementation's own CAS
+logic. Relying solely on epoch equality discards that defense-in-depth for no
+benefit — the comparison is no more expensive to also check `holder_id`. Confirmed
+against the Rust reference implementation: its runtime fencing check actually
+invoked at WAL-sync boundaries (`LeaderStore::validate_epoch`, checked before every
+durable WAL sync) compares **only** epoch, never `holder_id` — narrower than §6
+item 1 requires. (Renewal's own self-check, step 2 above, does compare both
+correctly; it's specifically this separate hot-path sync-boundary check that needs
+the same treatment.) Recommended fix: extend `validate_epoch` (or add an equivalent
+check on the same hot path) to also compare the in-memory `holder_id` against the
+live leader record's, matching what §6 item 1 requires — and matching the C#
+reference implementation's own equivalent hot-path check, `EnsureValid()`, which
+already compares both (`current?.Epoch != Epoch || current.HolderId != _holderId`).
+This isn't a hypothetical stricter design being proposed here for the first time;
+it's what the other reference implementation already does.
+
 *How often* renewal happens (the heartbeat interval) is pure timing policy, out of
 scope for this document — see §8.
 
@@ -234,12 +324,16 @@ identity **unchanged** but `acquired_at` forced to an ancient/minimum timestamp
 (observed value: the Unix epoch, `1970-01-01T00:00:00Z`) — guaranteeing any age
 computation against it exceeds the staleness threshold.
 
-**TODO: verify** — whether forcing `acquired_at` to a fixed sentinel-old value
-(versus, say, deleting the record entirely, or defining a distinct explicit
-"released" marker/field) is the intended cross-engine format contract, or one
-implementation's convenient way to piggyback release on the existing staleness
-check without adding a new field. Deleting the record was not observed in either
-implementation studied.
+**Confirmed as the intended cross-engine format contract**, not one
+implementation's convenience: the C# reference implementation's `Dispose()`
+independently produces the exact same sentinel, `AcquiredAt = "1970-01-01T00:00:00Z"`
+(down to the literal string), on the same unchanged-epoch/holder_id rewrite. Two
+independently-built implementations landing on the identical sentinel string,
+rather than merely "some ancient timestamp," is strong evidence this specific
+value is deliberate rather than incidental — a third implementation should use
+this exact string, not just any sufficiently-old timestamp, for maximal
+byte-level interop with tooling that might compare records literally. Deleting the
+record instead was not observed in either implementation.
 
 Release does not increase the epoch. The next successful acquirer still computes
 `epoch = previous_epoch + 1`.
@@ -248,6 +342,17 @@ Release is explicitly best-effort: if it cannot complete (I/O error, lock
 contention), the holder proceeds with shutdown anyway. The record is left as the
 holder's last-renewed state, and a future acquirer takes over once the ordinary
 staleness window elapses.
+
+**Implementation note:** "best-effort" here describes the *contract* (a failed
+release must never block shutdown or be treated as a fatal error) — it doesn't
+mandate exactly one attempt. The Rust reference implementation has two release call
+sites with different retry behavior: a single-attempt best-effort release during
+ordinary startup-failure cleanup, and a separate shutdown path that retries release
+indefinitely in a detached background thread — so a transient failure doesn't leave
+a live-looking record behind, without that retry loop blocking the shutdown that
+triggered it. Both satisfy the contract above; a from-scratch implementation is
+free to choose either strategy (or another) as long as release failure never blocks
+or fails shutdown.
 
 ## 6. Fencing semantics
 
@@ -292,22 +397,50 @@ failing, not on re-deriving its own staleness.
 
 - A leader record file that exists but is empty, or whose bytes are not valid UTF-8,
   must be treated as **indeterminate**, not as "no lease" and not as "definitely
-  stale" — see §6 item 3. (**TODO: verify**: one implementation studied treats a
-  present-but-unparseable record file as indeterminate/error; confirm this is
-  intended to be universal rather than that implementation's specific choice to fail
-  a `TryParse`.)
+  stale" — see §6 item 3.
 - A record missing any of the three required fields (`epoch`, `holder_id`,
   `acquired_at`), or with an `epoch` value that does not parse as a non-negative
   integer within the field's width, must likewise be treated as indeterminate.
+
+  **Known gap in the reference implementation ("midge") — safety-relevant, fix
+  needed:** midge does not follow either rule above as written. An **empty** leader
+  record file, and a **present-but-field-incomplete-or-malformed** record, both
+  return the same result as an *absent* file ("no lease," i.e. an effective epoch
+  baseline of 0 for the next acquirer) rather than failing closed as indeterminate —
+  a corrupted-but-present record silently resets fencing state instead of blocking
+  acquisition. Separately, a **non-UTF-8** record does fail closed in midge, but as
+  a generic I/O error rather than the specific indeterminate/error classification
+  this document describes. A from-scratch implementation that follows this
+  document's literal text (fail closed as indeterminate on all three conditions)
+  will be *stricter and safer* than the current reference implementation, not
+  merely different from it — this reads as a bug in midge relative to its own
+  extracted spec, worth fixing there rather than relaxing the rule here. The C#
+  reference implementation gets this right, and can serve as the fix reference:
+  `MidgeFileLease.ReadRecord` throws its indeterminate exception both when the file
+  is empty (no lines parse into any field) and when any of the three required
+  fields is missing after parsing — it never conflates either case with "absent
+  file." Midge should be brought in line with that behavior.
 - A record containing a **duplicate** field (the same field name on two lines) is
   **not** corruption: the reference parser scans lines in order and simply
   overwrites each field's value as it re-encounters that field name, so the
   **last** occurrence of a given field in the file wins. A reader must reproduce
-  this exact behavior (last-occurrence-wins), not reject duplicates. (An earlier
-  draft of this document flagged a cross-implementation divergence on this point —
-  one implementation studied rejects duplicates instead. That implementation is
-  the non-authoritative one for this spec; this rule now reflects the reference
-  implementation's actual, verified behavior.)
+  this exact behavior (last-occurrence-wins), not reject duplicates. This is a
+  standing decision, not an open question: an earlier draft of this document
+  flagged a cross-implementation divergence here — the C# reference
+  implementation's `MidgeFileLease.ReadRecord` does reject a duplicate field
+  (throwing its indeterminate exception), directly confirmed against its source —
+  and this document deliberately designates the Rust engine's last-occurrence-wins
+  behavior as authoritative for the shared format, not the C# engine's rejection.
+  *(Worth weighing if this decision is ever revisited: no conforming writer can
+  produce a duplicate field in the first place — every write replaces the whole
+  file atomically in one shot — so a duplicate's mere presence is itself evidence
+  of external tampering or a non-conforming writer, the same category of "trust
+  nothing, fail closed" situation §6 item 3 and this section's other rules already
+  handle by failing closed rather than silently picking an interpretation. The C#
+  engine's reject-as-indeterminate behavior is arguably more consistent with that
+  pattern than the standing last-occurrence-wins rule is. Restated here as a
+  design note for whoever next revisits this section, not as a reversal of the
+  standing decision above.)*
 - There is no checksum over the leader record. Corruption/tampering that produces
   syntactically valid-but-wrong field values (e.g. bytes flipped inside a still
   parseable ASCII decimal `epoch`) is **not detectable** by this format as
@@ -356,12 +489,26 @@ correctly implement §3–§7:
 
 Ambiguous / needs a decision when writing the canonical spec:
 
-- **TODO: verify** — Exact filenames (`.midge_leader`, `.midge_leader.lock`) as a
-  required format detail versus convention; see §1.1.
-- **TODO: verify** — Whether release forcing `acquired_at` to a sentinel-old
-  timestamp (rather than deleting the record, or a dedicated "released" marker) is
-  the intended shared contract; see §5.3.
+- **Confirmed** — `.midge_leader` and `.midge_leader.lock` are used verbatim by
+  both reference implementations (the C# engine's `MidgeFileLease` constructs both
+  paths with these exact literal names), not merely the Rust engine's convention;
+  see §1.1. Given cross-implementation agreement, treat these as a required format
+  detail for interop, not an arbitrary convention a third implementation is free to
+  rename.
+- **Confirmed** — Release forcing `acquired_at` to the exact sentinel
+  `1970-01-01T00:00:00Z` (rather than deleting the record, or a dedicated
+  "released" marker) is the intended shared contract: both reference
+  implementations independently produce the identical sentinel string; see §5.3.
 - **TODO: verify** — Whether the missing checksum over the leader record is an
   accepted gap or an open format issue; see §7.
-- **TODO: verify** — Whether any implementation requires an OS-level lock as
-  defense-in-depth alongside the leader record; see §1.
+- **Confirmed** — No implementation requires an OS-level lock as defense-in-depth
+  alongside the leader record; midge takes none (dead code remains from a prior
+  design). See §1.
+- **Confirmed** — The relationship between this document's `epoch` (§2) and the
+  WAL's `writer_epoch` (`wal.md` §2, TLV tag 10, §6.4): in the Rust reference
+  implementation they are the same value by construction — a successful lease
+  acquisition's `epoch` is copied verbatim, once, into `writer_epoch` before WAL
+  replay runs, and is never reassigned afterward. This is a one-time seed, not an
+  ongoing enforced identity and not an independent counter — see `wal.md` §7 for
+  the full trace and its consequence for the caller-supplied-minimum claim in §4
+  step 4 above.

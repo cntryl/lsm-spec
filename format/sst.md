@@ -103,21 +103,71 @@ Base header (26 bytes), little-endian:
 | `expiration_present` | u8 | 17 | `0` or `1`. Any other value is corruption. |
 | `expiration_millis` | u64 | 18 | TTL expiration timestamp. Must be `0` when `expiration_present == 0` (non-canonical nonzero bytes with `expiration_present == 0` are treated as corruption, not silently ignored) — this makes "no TTL" and "TTL exactly at Unix epoch 0" and "TTL at `u64::MAX`" all distinguishable, unlike an earlier encoding that could not represent a `None`/`Some(u64::MAX)` distinction. |
 
-If `key_delta_len == 0xFFFF` **and** `value_len == 0xFFFFFFFF` in the base header,
-an **extended length block** immediately follows the base header, before the key
-bytes:
+**`Merge` (`entry_type = 3`) is RESERVED as of this spec version.** This document
+defines its wire encoding (identical framing to `Put`/`Insert`, so a reader must
+still be able to parse one structurally) but no merge-operator semantics exist yet
+anywhere in this spec set — how multiple `Merge` operands for the same key would
+combine into a resolved value, and whether that resolution happens at read time or
+at compaction time, are both undefined. No operation in [`wal.md`](wal.md)'s `OP`
+registry (§5.1) produces a `Merge` record either, so there is no defined path from a
+conforming WAL writer to a `Merge` SST entry in the first place. **A conforming
+writer MUST NOT emit `entry_type = 3` until a future revision of this spec defines
+merge-operator semantics.** Confirmed against the Rust reference implementation:
+this matches its actual behavior exactly — no production code path (memtable,
+compaction, or flush) ever constructs an entry with `op_type == 3`; the only place
+the byte value `3` is even reachable is a decode-side dispatch table with no live
+caller that passes it. Nothing needs to change in midge here; this reservation
+simply makes that already-correct behavior a spec requirement rather than an
+accident of what nothing currently produces.
+
+A reader MUST treat the extended form as in use if and only if **both**
+`key_delta_len == 0xFFFF` **and** `value_len == 0xFFFFFFFF` hold in the base header
+— this conjunctive (both-fields) check, not a single-field check against
+`key_delta_len` alone, is the reader-side trigger. When it holds, an **extended
+length block** immediately follows the base header, before the key bytes:
 
 | Field | Size | Description |
 |---|---|---|
 | `extended_key_delta_len` | u32 | Real key-delta length (used instead of the u16 field). |
 | `extended_value_len` | u32 | Real value length (used instead of the u32 marker field). |
 
-This lets a key delta exceed 65,535 bytes while keeping the common case's header at
-26 bytes. The two marker values (`0xFFFF` / `0xFFFFFFFF`) are reserved sentinels, not
-legitimate lengths — a real key-delta length of exactly 65,535 bytes must also use
-the extended form (a writer promotes to the extended form at that boundary even
-though 65,535 itself would technically fit the inline u16 field, to keep the marker
-unambiguous).
+This lets a key delta exceed its inline u16 field's range and lets the marker pair
+represent legitimate lengths while keeping the common case's header at 26 bytes.
+Because both extended lengths are u32 values, neither real length may exceed
+4,294,967,295 bytes (`u32::MAX`); a writer MUST reject an entry whose key delta or
+value exceeds that limit.
+
+**Writer requirement — precise version** (revised; see the note below on why an
+earlier version of this rule was stricter than necessary): a writer MUST use the
+extended form whenever any of the following hold, and MAY use it more liberally at
+its own discretion:
+- the real key-delta length exceeds 65,535 bytes (physically doesn't fit the
+  inline u16 field), or
+- the real key-delta length is *exactly* 65,535 bytes **and** the real value
+  length is *exactly* 4,294,967,295 bytes, simultaneously — the one combination
+  that would otherwise be indistinguishable from the extended-form marker pair
+  itself if written inline.
+
+A writer is **not** required to promote to the extended form solely because the
+real key-delta length happens to equal exactly 65,535 bytes, as long as the real
+value length is not *also* exactly 4,294,967,295 at the same time — writing
+`key_delta_len = 0xFFFF` as a literal, ordinary length is safe and correctly
+decodable under the conjunctive reader rule above, precisely because the reader
+only treats it as "extended in use" when `value_len` is *also* the sentinel.
+
+*(Correction: an earlier version of this document stated the marker values are*
+*"reserved sentinels, not legitimate lengths" categorically, and required a writer*
+*to always promote at exactly 65,535 bytes regardless of value length. That was*
+*stricter than necessary. Confirmed against the Rust reference implementation's*
+*reader: it implements exactly the conjunctive check above, not a single-field*
+*check — meaning a writer that skips promotion at `key_delta_len == 65535` with an*
+*ordinary value length produces perfectly valid, round-trippable output under this*
+*format's actual reader contract. The reference implementation's own writer already*
+*implements close to this precise minimal rule (it separately checks whether the*
+*value length also needs the extended marker before deciding not to promote), so*
+*this correction resolves what an earlier audit pass mischaracterized as a writer*
+*bug — it wasn't a bug relative to the real, working contract, only relative to*
+*this document's previously overstated prose.)*
 
 Following the (base or extended) header:
 
@@ -139,14 +189,12 @@ block always encodes against an empty "previous key" (i.e. its `shared_prefix_le
 is 0 and its `key_delta` is its full key) — a data block is always independently
 decodable from its own first byte without needing entries from a neighboring block.
 
-`RESTART_INTERVAL = 16` is a defined constant governing "restart sampling of
-prefix-compressed entries" on the write/read path. **TODO: verify**: the exact
-reader-visible semantics of this constant were not confirmed from an independent
-design doc — whether it currently does anything beyond bounding how many
-sequentially-linked entries a scan must decode before re-verifying its position, or
-whether it is fully vestigial today (since, per §3.1, there is no in-block restart
-offset table that would let a reader jump to interval boundaries directly). Treat
-the *value* 16 as informative but not yet a confirmed wire-format invariant.
+`RESTART_INTERVAL = 16` is a defined constant in the Rust reference implementation.
+**Confirmed fully vestigial**: it has no reader-visible semantics today — it is not
+referenced anywhere outside its own declaration, doesn't bound scan-verification
+behavior, and (per §3.1) there is no in-block restart offset table it could govern
+even in principle. Treat the *value* 16 as a historical artifact, not a
+wire-format invariant — see §9.
 
 ### 3.4 Tombstones inside a data block
 
@@ -155,6 +203,21 @@ Whether it carries a zero-length value or an absent value is significant: a valu
 present (even a zero-length one) for any entry type *other than* `Delete`, and for
 `Delete` entries a value is present only if `value_len > 0` — in the normal case a
 `Delete` is written with `value_len == 0` and therefore has *no* value region at all.
+
+**A `Delete` entry with `value_len > 0` is RESERVED as of this spec version.**
+[`wal.md`](wal.md) §5.1 defines the WAL's `Delete` operation as always value-less
+(`VALUE` TLV tag never permitted), and the WAL, via memtable flush, is the only
+mutation source this spec set documents flowing into an SST — so there is no
+defined path from a conforming WAL writer to a value-bearing `Delete` SST entry.
+**A conforming writer MUST NOT set `value_len > 0` on a `Delete` entry** until a
+future revision of this spec defines a use for it; a reader must still decode the
+wire state correctly (per §3.2's general rule) for forward compatibility with a
+future revision that does define one. Confirmed against the Rust reference
+implementation: this matches its actual behavior — the codec can structurally
+encode/decode it, but every production writer path (memtable delete, compaction
+tombstone emission) is incapable of attaching a value to a delete in the first
+place, since the in-memory tombstone representation has no value field to carry
+one. Nothing needs to change in midge here.
 
 ## 4. Accelerator and index structures
 
@@ -358,14 +421,28 @@ length).
 A reader opens an SST by:
 
 1. Reading the file's total length.
-2. Reading the last 84 bytes as the footer.
-3. Validating `magic` and `crc32c` first. A magic mismatch or checksum failure at
-   this stage is `Corruption`. **Exception**: if the file is *shorter* than 84 bytes,
-   or the 84-byte footer fails to decode, a reader additionally checks whether the
-   last 8 bytes of the file equal the magic value alone — if so, this indicates a
-   pre-V4 (V1–V3) footer shape from an older, incompatible format generation, and
-   must be reported as `CompatibilityError` ("unsupported old format"), distinct
-   from ordinary corruption.
+2. Reading the last 84 bytes as the footer, if the file is at least 84 bytes long.
+3. Locating and validating the footer, in this order (the legacy check in (b) always
+   runs before a magic/checksum failure is reported as ordinary corruption — it is
+   not a competing, independent rule):
+   a. If the file is at least 84 bytes long, validate the footer's `magic` and
+      `crc32c` (§7). If both validate, proceed to step 4.
+   b. If the file is *shorter* than 84 bytes, or step (a)'s validation failed (magic
+      mismatch or checksum failure), check whether the file is at least 8 bytes long
+      and whether its *last 8 bytes* equal the magic value alone
+      (`0xDB47_7524_8B80_FB57`, §7). If so, this indicates a pre-V4 (V1–V3) footer
+      shape from an older, incompatible format generation, and must be reported as
+      `CompatibilityError` ("unsupported old format"), distinct from ordinary
+      corruption.
+   c. If neither (a) nor (b) succeeds — the file is too short even for the 8-byte
+      legacy check, or the last 8 bytes don't equal the magic value either — the
+      failure is `Corruption`.
+
+   (**Confirmed** against the Rust reference implementation: this is exactly its
+   footer-loading branch structure — full footer decode is attempted first whenever
+   the file is ≥84 bytes, and the bare-8-byte-magic legacy check runs strictly as a
+   fallback on that failure, never independently or ahead of it. There is no
+   alternate footer-parse call site in the reference implementation.)
 4. Validating `format_version == 4` (`CompatibilityError` if not — including
    both older and unknown-future versions; there is no forward-compatible
    best-effort read path).
@@ -464,3 +541,28 @@ Ambiguous / needs a decision when writing the canonical spec:
   in the Rust engine's repo documents the V4 transition as exactly that kind of hard
   break; whether that precedent is meant to generalize to all future bumps is not
   independently confirmed.
+- **Decided** — `Merge` (`entry_type = 3`, §3.2) is declared reserved as of this
+  spec version (see §3.2's note) rather than left open: no merge-operator contract
+  exists anywhere in this spec set, no WAL operation produces it, and it's
+  confirmed dead code in the Rust reference implementation. Still open: whether a
+  merge-operator concept exists in the C# reference implementation — if so, this
+  reservation should be lifted in favor of a real specification rather than staying
+  reserved indefinitely.
+- **Decided** — A `Delete` entry with `value_len > 0` (§3.4) is declared reserved
+  as of this spec version (see §3.4's note): confirmed never produced by the Rust
+  reference implementation's writer paths, and no defined use case exists for it.
+  Still open: whether the C# reference implementation produces it via some path not
+  covered here, which would mean this reservation needs revisiting rather than
+  standing.
+- **Resolved — this was a spec bug, not an implementation bug.** A previous audit
+  pass flagged the Rust reference implementation's writer as violating an earlier
+  version of §3.2's rule ("`key_delta_len == 0xFFFF` is never a legitimate literal
+  length; a writer must always promote at exactly 65,535 bytes"). On closer
+  inspection that rule itself was wrong: the reference implementation's *reader*
+  requires both `key_delta_len` and `value_len` to match their sentinel before
+  treating a record as extended (a conjunctive check), and the writer's actual
+  behavior (promote when the key delta exceeds 65,535, or equals exactly 65,535
+  *and* the value length also needs the marker) is safely decodable under that
+  real reader contract — not a bug. §3.2/§3.3 have been corrected to state the
+  precise minimal writer requirement this behavior already satisfies, rather than
+  the unnecessarily strict single-field rule. No change needed in midge here.

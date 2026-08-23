@@ -31,9 +31,10 @@ don't mistake it for a wire-compatibility requirement.
 
 A WAL lives under a directory (`wal_dir`) that contains:
 
-- **One active file**, always named `wal.log`. This is the only mutable WAL file:
-  frames are appended to it as writes occur. It is never uploaded/shipped to
-  secondary storage as-is (only sealed segments are).
+- **One active file**, always named `wal.log` for any directory written by a
+  conforming current writer. This is the only mutable WAL file: frames are appended
+  to it as writes occur. It is never uploaded/shipped to secondary storage as-is
+  (only sealed segments are).
 - **Zero or more sealed segment files**, one per rotation, named as a fixed-width
   decimal segment id with a `.wal` extension:
 
@@ -54,10 +55,19 @@ A WAL lives under a directory (`wal_dir`) that contains:
 Segment ids are monotonically increasing per WAL instance (`writer_epoch`-scoped in
 cloud-durability configurations, see §1.2).
 
-A legacy/alternate active-file naming convention `wal_{segment:06}.log` is also
-recognized by segment-id parsing (`wal_000123.log` → `123`) — **TODO: verify** whether
-this is still produced by any writer or is purely a backward-compatibility parse path
-for reading old data; do not rely on it for new writers.
+A legacy/alternate naming pattern `wal_{segment:06}.log` is also recognized by
+segment-id parsing (`wal_000123.log` → `123`). **This is not a second valid name for
+the current active file** — the active file is identified strictly as `wal.log` per
+the bullet above, and the recovery/replay order below (§1.1 "Recovery/replay order")
+only ever looks for `wal.log` in that role — but a reader's segment-id-parsing
+routine must still recognize this pattern when it appears, since it may be present in
+directories written by older code. **Confirmed** against the Rust reference
+implementation's current source: no code path anywhere ever *writes* a file matching
+this pattern (there is no `format!("wal_...")` call in the codebase) — it exists
+purely as a decode-side parsing accommodation. Whether it was ever actually produced
+by a now-removed historical writer version (rather than being purely defensive
+parsing for hypothetical/foreign input) isn't determinable from the current source
+alone — **TODO: verify** against the C# reference implementation and/or git history.
 
 #### Recovery/replay order
 
@@ -86,6 +96,15 @@ does change what "durable" and "authoritative" mean. This layer is describable a
 
   (the `wal/` prefix is a deployment-configurable root; `epochs/{epoch}/` and the
   zero-padded segment filename are the fixed parts of the layout).
+
+  **This is a real constraint on what may be uploaded, not just a naming
+  convention:** because the object key names exactly one `writer_epoch`, the byte
+  range uploaded under it MUST NOT itself mix records from more than one
+  `writer_epoch` — unlike a local on-disk file, which §6.4 point 3 explicitly
+  permits to mix epochs. A writer preparing an upload must guarantee this, e.g. by
+  validating the byte range before upload and refusing/splitting/deferring it if it
+  isn't single-epoch (the exact mechanism is a writer implementation choice; only
+  the invariant — one epoch per uploaded object — is normative here).
 
 - **A lease-fenced publication catalog.** A single JSON object (**not the WAL frame
   format** — see §1.2.1) lists which uploaded segment objects are authoritative for
@@ -127,10 +146,18 @@ The catalog is encoded as JSON (pretty-printed) with this logical shape:
 }
 ```
 
+`<segment_id as string>` is the **canonical, unpadded decimal** representation of the
+u64 `segment_id` (e.g. `"42"`, not `"00000000000000000042"`) — this is a different
+string form than the zero-padded 20-digit segment id used in local segment filenames
+and inside `object_key` above; do not confuse the two.
+
 Validity constraints on decode:
 - `format_version` must equal the currently understood version (`1`).
 - `fencing_epoch` must be non-zero.
 - Every entry's `segment.writer_epoch` must be `<= fencing_epoch`.
+- Every entry's map key must exactly equal the canonical unpadded-decimal string form
+  of that same entry's own `segment_id` field — a mismatch (e.g. key `"42"` on an
+  entry whose `segment_id` is `99`) is corruption, not a warning.
 - Every entry's `object_key` must exactly equal the canonical
   `wal/epochs/{writer_epoch:020}/{segment_id:020}.wal` key derived from its own
   `segment_id`/`writer_epoch` — a mismatch is corruption, not a warning.
@@ -293,11 +320,12 @@ carries meaning per §5.
   that doesn't understand a given compression byte cannot safely decode the value —
   this makes the compression scheme part of the effective compatibility surface even
   though it's logically a value-codec concern layered on top of the WAL TLV format.
-  One observed threshold for "worth compressing" is a minimum input size (**TODO:
-  verify exact byte threshold — implementations differ or the constant is
-  configurable**); this threshold is a writer-side heuristic, not a format
-  requirement — a reader must accept both compressed and uncompressed values
-  regardless of size.
+  The threshold for "worth compressing" is a minimum input size — confirmed as
+  `MIN_COMPRESSION_INPUT_BYTES = 256` bytes in the Rust reference implementation,
+  shared with the SST compression path (see
+  [`value-encoding.md`](value-encoding.md#1-compression-algorithm-ids)); this
+  threshold is a writer-side heuristic, not a format requirement — a reader must
+  accept both compressed and uncompressed values regardless of size.
 - Presence of `VALUE` as an empty (zero-length) TLV is a legitimate, distinct wire
   state from `VALUE` being entirely absent (used to represent "Put with an empty
   string value" vs. "Delete/no value").
@@ -359,9 +387,15 @@ the wire format, and a recovering reader must support both:
   transaction is valid and is applied entirely) or it doesn't (in which case, per §6,
   it is either the very last frame in the active file — treated as an incomplete tail
   and dropped — or it is mid-stream corruption, a hard error).
-- This is the preferred/current encoding; legacy split-marker transactions remain
-  supported for reading older data (**TODO: verify** whether any current writer still
-  emits split-marker transactions, or whether that path is read-only/deprecated).
+- This is the preferred/current encoding for ordinary-sized transactions; legacy
+  split-marker transactions remain supported for reading older data, **and are also
+  still an actively-emitted current-writer path, not merely legacy-read
+  compatibility**: the Rust reference implementation falls back to split-marker
+  framing (`TxnBegin` / individual ops / `TxnCommit`) for a transaction too large to
+  buffer as a single atomic `TxnBatch` frame (a "spill" path). A from-scratch writer
+  that only ever emits `TxnBatch`, and treats split-marker purely as a read-path
+  concern, will diverge from the reference implementation's behavior on oversized
+  transactions.
 
 Nested transaction markers (a batch containing another `TxnBegin`/`TxnCommit`/
 `TxnBatch`) are invalid and must be rejected.
@@ -411,10 +445,16 @@ Field-by-field:
 - `range_end`: 1-byte flag followed by, if `1`, a 4-byte LE u32 length + bytes.
 
 Minimum length per nested record: 1(op) + 4(cf_id) + 8(seq) + 1(exp flag) +
-4(key length prefix) = **20 bytes**, before accounting for actual key/value/range-end
-content. A decoder must use this minimum to bound `op_count` against remaining bytes
-*before* attempting a per-record allocation, to avoid a small buffer causing an
-attempted huge allocation from an attacker-/corruption-controlled `op_count`.
+4(key length prefix) + 1(value flag) + 1(range_end flag) = **20 bytes**, before
+accounting for actual key/value/range-end content. The `value` and `range_end`
+presence flags are each a mandatory 1 byte regardless of whether their optional
+length+bytes follow (see the field table above) — both must be included when
+computing this minimum. A decoder must use this minimum to bound `op_count` against
+remaining bytes *before* attempting a per-record allocation, to avoid a small buffer
+causing an attempted huge allocation from an attacker-/corruption-controlled
+`op_count`. (**Confirmed**: the Rust reference implementation's own minimum-record-
+length constant is computed as this same 7-term sum and equals 20, used for the
+identical anti-huge-allocation guard.)
 
 Trailing bytes after the last nested record (i.e. input not fully consumed) is
 corruption.
@@ -507,21 +547,52 @@ than one writer generation:
 1. Recovery performs an initial pass to discover, per file in replay order, the
    lowest sequence number and lowest replay-ordinal position at which each observed
    `writer_epoch` first appears. `writer_epoch == 0` is treated as unfenced/not
-   participating in this mechanism (**TODO: verify** — `0` appears to be a sentinel
-   for "no epoch fencing configured" in at least one code path; confirm this is a
-   deliberate protocol value rather than just an unset-field default that happens to
-   be excluded).
+   participating in this mechanism. **Confirmed** against the Rust reference
+   implementation: `writer_epoch == 0` is deliberately special-cased as an
+   epoch-fencing-disabled sentinel in exactly the two places that matter (recording
+   a frontier, and testing staleness) — not an incidental unset-field default.
 2. A record from writer epoch *E* is considered **stale** (skipped, not applied,
    still counted separately in recovery stats) if there exists some other epoch
    *E' > E* whose first-seen sequence number is `<=` this record's sequence number,
    or whose first-seen replay-ordinal is earlier than this record's ordinal. In
    effect: once a higher epoch's writes are known to have started, any lower-epoch
-   record whose effect could conflict with or be superseded by them is dropped.
-3. Within a single **active-file scan** (not across separate sealed segments), all
-   records must share one `writer_epoch` — a file mixing more than one epoch value is
-   corruption. (**TODO: verify** scope: whether this "no mixing" rule applies per
-   physical file only, or is meant to hold for the logical replay stream as a whole;
-   the source enforces it per contiguous scan of one file/segment's bytes.)
+   record whose effect could conflict with or be superseded by them is dropped. The
+   "ordinal" is a single counter spanning the whole logical replay stream (all
+   sealed segments in ascending order, then the active file), never reset between
+   files — confirmed against the reference implementation.
+3. **Epoch-mixing within a single physical local WAL file (active or sealed) is
+   normal, not corruption, and must not be rejected.** This format's active file is
+   reopened in append mode across a writer failover, not rotated at the epoch
+   boundary — there is no mechanism in this document (see §1.1) that seals `wal.log`
+   at the moment a new writer acquires a higher epoch. It is therefore the expected
+   result of an ordinary crash-then-failover cycle for one `wal.log` — and, since
+   rotation moves the file's bytes verbatim into a sealed segment, potentially a
+   sealed segment too — to contain records spanning more than one `writer_epoch`,
+   distinguished only by the per-record `writer_epoch` field, never by file
+   boundaries. Point 2's staleness rule is the *sole* mechanism this document
+   defines for resolving such a file during local recovery. A conforming reader
+   MUST NOT implement a separate "reject on epoch-mixing" check for local recovery:
+   doing so would fail on data this format's own append-on-reopen recovery model
+   produces routinely, rejecting perfectly ordinary post-failover WAL state as
+   corrupt. (This is narrower than, and does not contradict, the cloud-upload
+   requirement in §1.2 that an *uploaded* object's byte range be single-epoch —
+   that's a constraint on what a writer chooses to upload, not on what a local file
+   may contain.)
+
+   *(Spec correction: an earlier draft of this document stated the opposite here —
+   that a file mixing more than one epoch is corruption. That was wrong, not merely
+   unconfirmed: it directly contradicts the append-on-reopen recovery model this
+   same document describes elsewhere, and enforcing it as written would break
+   ordinary failover recovery. Confirmed against the Rust reference implementation:
+   its primary local-recovery path correctly tolerates epoch-mixing via staleness
+   alone and is proven correct by a passing test that interleaves two epochs in one
+   file and replays successfully — that behavior is what this document now
+   specifies. The reference implementation does separately enforce single-epoch
+   validation in two narrow helpers reachable only from the cloud-upload/download
+   path, which is the real, narrower requirement now captured in §1.2. The C#
+   engine independently corroborates the same design — it also reopens its active
+   WAL file in place across a failover rather than rotating it, with no
+   epoch-mixing rejection anywhere in its local recovery path.)*
 4. `max_epoch_seen` (the highest writer epoch observed anywhere during recovery) is
    surfaced to the caller so the engine can resume issuing new writes starting at an
    epoch higher than anything seen.
@@ -567,20 +638,53 @@ correctly implement §3–§6:
 
 Ambiguous / needs a decision when writing the canonical spec:
 
-- **TODO: verify** — Whether the legacy split-marker transaction encoding (§5.3a) is a
-  permanent part of the format contract (must remain writable/readable indefinitely)
-  or is a deprecated-but-still-decodable path that new implementations may choose to
-  support read-only (or not at all, if they can guarantee no legacy data exists).
-- **TODO: verify** — The exact minimum-value-size compression threshold, and whether
-  it's a format-visible invariant (e.g. "readers may assume values under N bytes are
-  never compressed") or purely an internal writer heuristic with no reader-visible
-  consequence. If it has no reader-visible consequence, it should not appear in this
-  document at all beyond the note in §4.3.
-- **TODO: verify** — Whether `writer_epoch == 0` is a reserved/sentinel value with
-  defined semantics ("fencing disabled") that a conformant implementation must honor,
-  or an artifact of one implementation's default-value handling that shouldn't be
-  load-bearing in the shared spec.
+- **Confirmed, and revised** — The legacy split-marker transaction encoding (§5.3a)
+  is not a deprecated/read-only compatibility path: the Rust reference
+  implementation actively writes it today, as the fallback for transactions too
+  large to encode as a single atomic `TxnBatch` frame. A conforming writer that
+  wants interop with data produced by that implementation must be able to *emit*
+  split-marker transactions, not merely decode them.
+- **Resolved** — The minimum-value-size compression threshold (256 bytes, §4.3) is
+  confirmed purely an internal writer heuristic with no reader-visible consequence
+  — a reader must accept compressed or uncompressed values of any size regardless.
+  Kept as the note in §4.3 and in `value-encoding.md`, not elevated to a normative
+  invariant here, per this entry's own original recommendation.
+- **Confirmed** — `writer_epoch == 0` is a deliberate reserved/sentinel value
+  meaning "fencing disabled" in the Rust reference implementation (see §6.4 point
+  1), not an artifact of default-value handling. Recommend the canonical spec adopt
+  this as a normative reserved value rather than leaving it ambiguous.
 - **TODO: verify** — The frame-header-has-no-magic design (§3.1) as a permanent
   decision vs. an area open for the shared spec to change, given both known
   implementations agree today but a real forward-incompatible payload-version bump
   has apparently never been exercised in practice.
+- **Requirement, confirmed as a gap in the Rust reference implementation** — the
+  format's fencing guarantee (§6.4) only holds if every WAL record a given
+  `writer_epoch` ever produces genuinely postdates, in ordering terms, every record
+  already durable under any lower epoch. This document's source, `lease.md` §4 step
+  4, is where that invariant is actually enforced: a lease acquisition's newly
+  granted epoch must be at least `max_epoch_seen` from this engine's own WAL/
+  manifest recovery pass, not merely `1 +` whatever the lease file happened to
+  record. `writer_epoch` is then seeded verbatim from that granted epoch at engine
+  startup and never reassigned afterward — so if the lease-acquisition step doesn't
+  enforce the invariant, nothing downstream will catch a violation.
+
+  Confirmed against both reference implementations: the C# engine actually
+  implements this (`MidgeFileLease.Acquire` takes a `minimumEpoch` parameter,
+  threaded from a public `minimumWriterEpoch` argument on its top-level
+  `Open(...)` API), settling that the mechanism is a real, deliberate,
+  cross-implementation design element and not a spec artifact. The Rust engine
+  does **not** implement it: its lease-acquisition API takes no equivalent
+  parameter at all, WAL replay's `max_epoch_seen` (point 4 above) is computed but
+  never fed back into (or even reachable from) lease acquisition, and lease
+  acquisition completes in full *before* WAL replay runs at all. This is a real
+  gap to close in the Rust reference implementation, not a reason to relax the
+  requirement: see `lease.md` §4 step 4 for the recommended fix (add the
+  equivalent parameter to midge's own API surface, giving a caller with
+  out-of-band epoch knowledge the same capability the C# engine's callers already
+  have) and for the caveat that even the C# engine's default (`0`) leaves this
+  unprotected unless some caller actually supplies a non-default value.
+
+  In a cloud deployment, the same `lease.epoch()` value also seeds the WAL
+  catalog's `fencing_epoch` (§1.2/§1.2.1) — so lease `epoch`, local `writer_epoch`,
+  and cloud `fencing_epoch` are all one number by construction, and the gap above
+  applies to all three simultaneously.

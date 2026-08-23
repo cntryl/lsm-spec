@@ -28,7 +28,13 @@ by the containing structure (e.g. WAL TLV tag `COMPRESSION`, §4.2 of `wal.md`) 
 this document defines only the shared meaning of the ID byte itself, not where it's
 stored.
 
-**TODO: verify** the exact writer-side size threshold below which compression is
-skipped even when otherwise enabled. This is a writer heuristic (see `wal.md` §4.3),
-not a reader-visible format invariant, and may belong in a future
-`conformance/` note rather than here — recorded as open.
+**Confirmed, policy only (not a reader-visible format invariant)**: the Rust
+reference implementation's writer-side minimum-input-size threshold below which
+compression is skipped is `MIN_COMPRESSION_INPUT_BYTES = 256` bytes, defined once
+and shared by both the SST block compression path and the WAL value compression
+path (`wal.md` §4.3). This confirms it's a genuine writer heuristic as this
+document already assumed — a reader must accept a compressed or uncompressed value
+of any size regardless of this number, which exists purely to avoid paying
+compression overhead on inputs too small to benefit. Recorded here for reference,
+not as a format requirement; a conforming writer is free to use a different
+threshold (or none) without breaking interop.

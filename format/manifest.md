@@ -4,11 +4,13 @@ Status: draft, extracted from two independent implementations (a Rust engine and
 engine) for cross-checking. Sections marked "TODO: verify" reflect points where the
 two implementations agree today but the spec author could not find an explicit,
 independent design doc confirming the choice was deliberate (as opposed to
-implementation-shared incidental behavior). The C# engine currently only *reads*
-manifest state produced by the Rust engine (for compatibility testing); it has no
-independent writer, so every writer-side behavior below is sourced from the Rust
-implementation alone and cross-checked only against the C# reader's field-for-field
-expectations.
+implementation-shared incidental behavior). *(Note: this document previously stated
+the C# engine only reads manifest state and has no independent writer — as of a
+later audit pass, that's no longer accurate; the C# engine now has its own manifest
+writer too. It remains the newer, less battle-tested of the two implementations, so
+writer-side behavior below is still sourced primarily from the Rust implementation;
+C# is treated as corroborating rather than equally authoritative where the two
+haven't been reconciled.)*
 
 ## 1. Overview
 
@@ -89,13 +91,30 @@ midge-format-version=<version>\n
   understood" are rejected identically at this layer — there is no defined
   migration/negotiation path in-format).
 
-This marker is **not** manifest-specific — it is the single format gate for the whole
-database directory (WAL, SST, and manifest schemes are all versioned together via
-this one integer) — but it is documented here because the manifest's own on-disk
-shapes (below) are only guaranteed to match this document under version 3.
-**TODO: verify** what changed at each prior format version and whether any part of
-that history is specifically about the manifest's own encoding versus the SST/WAL
-encodings.
+This marker is **not** manifest-specific — it is the format gate for the whole
+database directory: opening a directory whose `FORMAT` value the engine doesn't
+understand is refused outright, regardless of which structure (WAL, SST, or
+manifest) within it actually changed between versions. It is documented here
+because the manifest's own on-disk shapes (below) are only guaranteed to match this
+document when `FORMAT` reads 3.
+
+**This integer is not the same value as, and has no arithmetic relationship to, the
+version fields embedded in individual structures** — e.g. the SST footer's own
+`format_version` (currently **4**, see `sst.md` §6–§7) and the WAL payload
+envelope's `version` byte (currently **1**, see `wal.md` §4.1). All three are real,
+independently-checked version gates today, and a conforming implementation must
+validate each one where it applies; none may be inferred from another. **Confirmed**
+against the Rust reference implementation: `CURRENT_FORMAT_VERSION` (3),
+`SST_FORMAT_V4` (4), and the WAL payload `VERSION` byte (1) are three separate
+constants with no code path anywhere that cross-checks or derives one from another —
+this isn't an oversight this document is flagging as unconfirmed, it's simply how
+the format works today. **TODO: verify** — whether a future bump of the
+directory-level `FORMAT` value is meant to imply anything about the SST/WAL
+sub-format versions (e.g. "`FORMAT` 4 requires SST `format_version >= 5`"), or
+whether these three counters are meant to remain independently-incremented forever.
+Separately unresolved: what changed at each prior `FORMAT` version and whether any
+part of that history is specifically about the manifest's own encoding versus the
+SST/WAL encodings — this isn't answerable from the current source alone.
 
 ## 3. Terminology
 
@@ -183,20 +202,28 @@ envelope":
 ```
 
 - `edit_id`: the durable, monotonically increasing identity for this record (§3).
-- `edit`: the actual `ManifestEdit` payload, serialized as a JSON tagged union (the
-  variant name and its fields — the exact JSON shape is an implementation-serializer
-  artifact, not independently specified here; **TODO: verify** the precise tag/field
-  JSON shape needed for a from-scratch reimplementation, since "JSON serialization of
-  a Rust enum" has several conventional shapes and this document does not pin one
-  down byte-for-byte).
+- `edit`: the actual `ManifestEdit` payload, serialized as a JSON tagged union — the
+  variant name and its fields. **Confirmed** against the Rust reference
+  implementation: `ManifestEdit` carries no `#[serde(tag = ...)]` attribute, so
+  serde's default **externally-tagged** representation applies —
+  `{"VariantName": <fields>}`, e.g. `{"RemoveSst": {"name": "..."}}`,
+  `{"AddSst": {<FileMeta fields, inlined>}}` (a newtype variant inlines its single
+  field's own object), `{"Batch": [<edit>, ...]}`. A from-scratch reimplementation
+  targeting interop with existing journals must reproduce this exact shape, not one
+  of the other conventional Rust-enum-to-JSON shapes (internally-tagged,
+  adjacently-tagged, or untagged).
 
 A reader must additionally accept a **legacy payload shape**: the bare `ManifestEdit`
 JSON value with no `edit_id`/`edit` wrapper at all. When a payload fails to parse as
 the envelope shape, a reader falls back to parsing it as a bare edit and synthesizes
 a locally-assigned edit id (one greater than the highest edit id seen so far in the
-replay). This lets old journals (written before the envelope wrapper existed) remain
-readable. **TODO: verify** whether new writers ever still produce the bare (non-
-enveloped) shape, or whether it is purely a read-compatibility fallback.
+replay, computed incrementally during that same forward sequential scan — not via a
+prescan of the file — so the synthesized id is deterministic for a fixed journal but
+depends on scan order rather than being a stable, persisted identity). This lets old
+journals (written before the envelope wrapper existed) remain readable. **Confirmed**
+against the Rust reference implementation: every append path always constructs the
+enveloped shape; the bare shape is a read-only compatibility fallback, never
+produced by a current writer.
 
 `ManifestEdit` variants and their fields (field names as JSON keys; all integers
 JSON numbers, not strings):
@@ -232,6 +259,17 @@ durable" and "journal truncated" can otherwise cause the same edit to be visible
 both the new snapshot and a stale journal tail (see §6.3), and idempotent apply
 semantics on every edit variant are what make that race harmless rather than a
 consistency bug.
+
+**Note on `SetCloudCheckpoint`'s comparison operator:** the Rust reference
+implementation's `apply_edit` handler for `SetCloudCheckpoint` advances on `>=`
+(not strict `>`) — a replayed edit whose `checkpoint_sequence` *equals* the current
+value still overwrites `covering_ssts`, unlike `BumpWalSeq`/`BumpNextSstSeq`, which
+both use strict `>`. This is still monotonic-non-decreasing (`checkpoint_sequence`
+itself never regresses), but it means replaying the same `checkpoint_sequence` with
+a different `covering_ssts` list is not a true no-op — the later-applied edit's
+`covering_ssts` wins. Whether this is intentional (`covering_ssts` for a given
+sequence can legitimately be refined/corrected across edits) or an oversight
+relative to the other two counters' strict comparison is **TODO: verify**.
 
 ### 4.4 Fsync markers and the durability boundary
 
@@ -322,10 +360,18 @@ A column family's manifest record (`ColumnFamilyMeta`) moves through these state
 1. **Active**: `deleted_at` absent (null). Newly created via `CreateColumnFamily`.
    Column family ids are allocated as `1 + max(existing ids)` (id `0` is reserved as
    the always-present default column family and is never allocated by this
-   mechanism — **TODO: verify** whether `id 0` as "the default CF" is asserted
-   anywhere at the format level versus purely a convention no writer currently
-   violates). Id allocation saturates rather than wraps at `u32::MAX` — an id-space
-   exhaustion is a hard error, not silent reuse.
+   mechanism). **Confirmed** against the Rust reference implementation: "`id 0` is
+   the default CF" is *not* asserted anywhere at the manifest/format level — the
+   next-id computation is a plain `max(existing ids) + 1` with no implicit `0`
+   folded in, and id 0 is never given an explicit `ColumnFamilyMeta` record at all.
+   "Reserved for default" is enforced purely as an application-layer convention (the
+   DDL layer rejects creating or dropping id 0 or the name `"default"` directly),
+   not by the manifest format itself — a from-scratch implementation must replicate
+   that application-layer restriction separately if it wants the same guarantee,
+   since nothing in the persisted manifest state stops a hypothetical
+   `CreateColumnFamily{id: 0, ...}` edit from being replayed. Id allocation
+   saturates rather than wraps at `u32::MAX` — an id-space exhaustion is a hard
+   error, not silent reuse.
 2. **Soft-deleted (tombstoned)**: `deleted_at` set to a millisecond timestamp via
    `DropColumnFamily`/`DropColumnFamilyAt`. The column family's id is **never
    reused** even after full reclamation (below) — the tombstone record persists
@@ -559,10 +605,13 @@ Ambiguous / needs a decision when writing the canonical spec:
   or a deprecated compatibility artifact that a new implementation could in
   principle skip writing (while still reading it as a base-state fallback per
   §5.1) without breaking any consumer.
-- **TODO: verify** — Whether the legacy split `DropColumnFamily` (no captured
-  frontier/file-set) edit variant is still ever produced by a current writer, or is
-  read-only-for-old-journals like the WAL's legacy split-marker transaction
-  encoding (`wal.md` §5.3a).
+- **Confirmed** — The legacy split `DropColumnFamily` (no captured frontier/
+  file-set) edit variant is never produced by any current writer in the Rust
+  reference implementation; only `DropColumnFamilyAt` is ever appended.
+  `DropColumnFamily` remains read-only-for-old-journals — unlike the WAL's legacy
+  split-marker transaction encoding (`wal.md` §5.3a), which the same audit found is
+  *still* actively emitted by a live code path (large-transaction spill), not
+  merely historical.
 - **TODO: verify** — The exact semantics implied by an absent entry in
   `next_sst_seqs` for a given `cf_id` (§5.6) — i.e., what sequence number the SST
   subsystem actually allocates first for a column family that has never had a
