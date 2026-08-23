@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/value-encoding.schema.json",
+  "title": "CompressionAlgorithm",
+  "description": "Shared compression-algorithm ID enum. See format/value-encoding.md §1.",
+  "type": "integer",
+  "enum": [0, 1, 2, 3],
+  "$comment": "0=None, 1=Lz4, 2=Zstd3, 3=Zstd9"
+}

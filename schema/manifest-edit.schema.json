@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/manifest-edit.schema.json",
+  "title": "ManifestJournalRecord",
+  "description": "JSON payload shapes for manifest.journal records. See format/manifest.md §4.2-§4.4. Exact tagged-union wire shape is flagged TODO: verify in the format doc; this schema reflects the field-name-based structure a decoder must accept, not a byte-for-byte-confirmed wire contract.",
+  "$defs": {
+    "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "u64": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "sstName": { "type": "string", "pattern": "^[^/\\\\:\\u0000]+\\.sst$" },
+    "fileMeta": { "$ref": "manifest.schema.json#/$defs/fileMeta" },
+    "edit": {
+      "oneOf": [
+        { "type": "object", "required": ["AddSst"], "additionalProperties": false, "properties": { "AddSst": { "$ref": "#/$defs/fileMeta" } } },
+        { "type": "object", "required": ["RemoveSst"], "additionalProperties": false, "properties": { "RemoveSst": { "type": "object", "required": ["name"], "properties": { "name": { "$ref": "#/$defs/sstName" } } } } },
+        { "type": "object", "required": ["CreateColumnFamily"], "additionalProperties": false, "properties": { "CreateColumnFamily": { "type": "object", "required": ["id", "name", "created_at"], "properties": { "id": { "$ref": "#/$defs/u32" }, "name": { "type": "string" }, "created_at": { "$ref": "#/$defs/u64" } } } } },
+        { "type": "object", "required": ["DropColumnFamily"], "additionalProperties": false, "properties": { "DropColumnFamily": { "type": "object", "required": ["id"], "properties": { "id": { "$ref": "#/$defs/u32" } } } } },
+        { "type": "object", "required": ["DropColumnFamilyAt"], "additionalProperties": false, "properties": { "DropColumnFamilyAt": { "type": "object", "required": ["id", "drop_sequence", "dropped_sst_names"], "properties": { "id": { "$ref": "#/$defs/u32" }, "drop_sequence": { "$ref": "#/$defs/u64" }, "dropped_sst_names": { "type": "array", "items": { "$ref": "#/$defs/sstName" } } } } } },
+        { "type": "object", "required": ["ReclaimColumnFamily"], "additionalProperties": false, "properties": { "ReclaimColumnFamily": { "type": "object", "required": ["id", "names"], "properties": { "id": { "$ref": "#/$defs/u32" }, "names": { "type": "array", "items": { "$ref": "#/$defs/sstName" } } } } } },
+        { "type": "object", "required": ["BumpWalSeq"], "additionalProperties": false, "properties": { "BumpWalSeq": { "type": "object", "required": ["seq"], "properties": { "seq": { "$ref": "#/$defs/u64" } } } } },
+        { "type": "object", "required": ["BumpNextSstSeq"], "additionalProperties": false, "properties": { "BumpNextSstSeq": { "type": "object", "required": ["cf_id", "next_seq"], "properties": { "cf_id": { "$ref": "#/$defs/u32" }, "next_seq": { "$ref": "#/$defs/u64" } } } } },
+        { "type": "object", "required": ["SetCloudCheckpoint"], "additionalProperties": false, "properties": { "SetCloudCheckpoint": { "$ref": "manifest.schema.json#/$defs/cloudCheckpoint" } } },
+        { "type": "object", "required": ["Batch"], "additionalProperties": false, "properties": { "Batch": { "type": "array", "items": { "$ref": "#/$defs/edit" } } } }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "title": "EditEnvelope",
+      "required": ["edit_id", "edit"],
+      "additionalProperties": false,
+      "properties": {
+        "edit_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "edit": { "$ref": "#/$defs/edit" }
+      }
+    },
+    { "title": "LegacyBareEdit", "$ref": "#/$defs/edit" },
+    {
+      "type": "object",
+      "title": "FsyncMarker",
+      "required": ["last_persisted_sequence", "ts_millis"],
+      "additionalProperties": false,
+      "properties": {
+        "last_persisted_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "ts_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    }
+  ]
+}

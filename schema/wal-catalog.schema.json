@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/wal-catalog.schema.json",
+  "title": "WalPublicationCatalog",
+  "description": "Cloud WAL publication catalog. See format/wal.md §1.2.1. This is the actual on-disk JSON shape, not a decoded logical projection.",
+  "type": "object",
+  "required": ["format_version", "fencing_epoch", "segments"],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": { "const": 1 },
+    "fencing_epoch": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
+    "segments": {
+      "type": "object",
+      "description": "Keyed by segment_id as a decimal string.",
+      "propertyNames": {
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "description": "Canonical, unpadded decimal u64 segment ID."
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["segment_id", "writer_epoch", "max_sequence", "size_bytes", "content_crc32c", "object_key"],
+        "additionalProperties": false,
+        "properties": {
+          "segment_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+          "writer_epoch": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+          "max_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+          "size_bytes": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+          "content_crc32c": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "object_key": {
+            "type": "string",
+            "pattern": "^wal/epochs/[0-9]{20}/[0-9]{20}\\.wal$",
+            "description": "Must equal the canonical key derived from this entry's own writer_epoch/segment_id."
+          }
+        }
+      }
+    }
+  }
+}

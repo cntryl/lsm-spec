@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/manifest.schema.json",
+  "title": "Manifest",
+  "description": "On-disk JSON shape of manifest.snapshot.json / manifest.json. See format/manifest.md §5.5-§5.6.",
+  "$defs": {
+    "sstName": {
+      "type": "string",
+      "pattern": "^[^/\\\\:\\u0000]+\\.sst$",
+      "description": "Single relative path component, no separators, ending in .sst. See format/manifest.md §4.3."
+    },
+    "fileMeta": {
+      "type": "object",
+      "required": ["name", "level", "size_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/sstName" },
+        "level": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "content_crc32c": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "cf_id": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 0 },
+        "sst_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "default": 0 },
+        "smallest_key": { "type": "string", "contentEncoding": "base64" },
+        "largest_key": { "type": "string", "contentEncoding": "base64" },
+        "smallest_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "largest_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "sublevel": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 0 }
+      }
+    },
+    "columnFamilyMeta": {
+      "type": "object",
+      "required": ["id", "name", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "name": { "type": "string" },
+        "created_at": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "deleted_at": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "drop_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "dropped_sst_names": { "type": "array", "items": { "$ref": "#/$defs/sstName" } },
+        "reclaimed": { "type": "boolean" }
+      }
+    },
+    "cloudCheckpoint": {
+      "type": "object",
+      "required": ["checkpoint_sequence", "covering_ssts"],
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "covering_ssts": { "type": "array", "items": { "$ref": "#/$defs/sstName" } }
+      }
+    }
+  },
+  "type": "object",
+  "required": ["last_persisted_sequence", "files", "column_families"],
+  "additionalProperties": false,
+  "properties": {
+    "last_persisted_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/fileMeta" } },
+    "column_families": { "type": "array", "items": { "$ref": "#/$defs/columnFamilyMeta" } },
+    "cloud_checkpoint": { "$ref": "#/$defs/cloudCheckpoint" },
+    "next_wal_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "default": 1 },
+    "next_sst_seqs": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+      "description": "Keyed by cf_id as a decimal string."
+    },
+    "edit_checkpoint_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "default": 0 }
+  }
+}

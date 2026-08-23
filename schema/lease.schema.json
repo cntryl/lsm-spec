@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/lease.schema.json",
+  "title": "LeaseRecord",
+  "description": "Logical (decoded) shape of the leader-record and mutation-lock files described in format/lease.md §3. The on-disk encoding is line-based text (field: value), not JSON; this schema validates the decoded field set for fixture cross-checking.",
+  "$defs": {
+    "leaderRecord": {
+      "type": "object",
+      "required": ["epoch", "holder_id", "acquired_at"],
+      "additionalProperties": false,
+      "properties": {
+        "epoch": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "holder_id": { "type": "string", "description": "Opaque; no assumed internal structure. See lease.md §3.2." },
+        "acquired_at": { "type": "string", "format": "date-time", "description": "RFC 3339 UTC timestamp." }
+      }
+    },
+    "mutationLock": {
+      "type": "object",
+      "required": ["holder_id", "owner_token", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "holder_id": { "type": "string" },
+        "owner_token": { "type": "string", "format": "uuid" },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/leaderRecord" },
+    { "$ref": "#/$defs/mutationLock" }
+  ]
+}

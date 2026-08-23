@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/sst.schema.json",
+  "title": "SstStructure",
+  "description": "Logical (decoded) shape of an SST's structural metadata and entries, for validating fixtures against format/sst.md. Describes decoded values, not wire bytes — the wire format (§3-§8 of sst.md) is normative.",
+  "$defs": {
+    "blockHandle": {
+      "type": "object",
+      "required": ["offset", "size"],
+      "additionalProperties": false,
+      "properties": {
+        "offset": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "size": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["entry_type", "sequence", "key"],
+      "additionalProperties": false,
+      "properties": {
+        "entry_type": { "type": "string", "enum": ["Put", "Insert", "Delete", "Merge"] },
+        "sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "key": { "type": "string", "contentEncoding": "base64" },
+        "value": { "type": "string", "contentEncoding": "base64", "description": "Absent for a Delete entry with value_len == 0; see sst.md §3.4." },
+        "expiration_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "entry_type": { "enum": ["Put", "Insert", "Merge"] } } },
+          "then": { "required": ["value"] }
+        }
+      ]
+    },
+    "rangeTombstone": {
+      "type": "object",
+      "required": ["start", "end", "seq"],
+      "additionalProperties": false,
+      "properties": {
+        "start": { "type": "string", "contentEncoding": "base64" },
+        "end": { "type": "string", "contentEncoding": "base64" },
+        "seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    }
+  },
+  "type": "object",
+  "required": ["footer", "meta", "index"],
+  "additionalProperties": false,
+  "properties": {
+    "footer": {
+      "type": "object",
+      "required": ["meta_index_handle", "index_handle", "format_version", "footer_size", "magic"],
+      "additionalProperties": false,
+      "properties": {
+        "meta_index_handle": { "$ref": "#/$defs/blockHandle" },
+        "index_handle": { "$ref": "#/$defs/blockHandle" },
+        "trie_handle": { "$ref": "#/$defs/blockHandle" },
+        "block_bloom_handle": { "$ref": "#/$defs/blockHandle" },
+        "format_version": { "const": 4 },
+        "footer_size": { "const": 84 },
+        "magic": { "const": "0xDB477524_8B80FB57" }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "required": ["format_version", "index_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "format_version": { "const": 4 },
+        "index_kind": { "type": "string", "enum": ["Sparse", "Trie"] },
+        "range_tombstone_handle": { "$ref": "#/$defs/blockHandle" },
+        "smallest_key": { "type": "string", "contentEncoding": "base64" },
+        "largest_key": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "index": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["first_key", "handle"],
+        "additionalProperties": false,
+        "properties": {
+          "first_key": { "type": "string", "contentEncoding": "base64" },
+          "handle": { "$ref": "#/$defs/blockHandle" }
+        }
+      }
+    },
+    "data_blocks": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/entry" }
+      }
+    },
+    "range_tombstones": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rangeTombstone" }
+    }
+  }
+}

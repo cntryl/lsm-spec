@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/wal.schema.json",
+  "title": "WalRecord",
+  "description": "Logical (decoded) shape of one WAL record, for validating fixtures produced by decoding the binary TLV payload described in format/wal.md §4. This schema describes the decoded logical value, not the wire bytes themselves — the wire format is normative; this is a cross-check aid.",
+  "type": "object",
+  "required": ["op", "cf_id", "seq", "key", "writer_epoch"],
+  "additionalProperties": false,
+  "properties": {
+    "op": {
+      "type": "string",
+      "enum": ["Put", "Insert", "Delete", "DeleteRange", "TxnBegin", "TxnCommit", "TxnBatch"],
+      "description": "See format/wal.md §5.1."
+    },
+    "cf_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "key": { "type": "string", "contentEncoding": "base64", "description": "Key bytes (or range-start), base64-encoded. May be empty." },
+    "value": { "type": "string", "contentEncoding": "base64", "description": "Present only when the TLV VALUE tag was present in the wire record (tag 5). Absence of this property must be distinguished from an empty string — see format/wal.md §4.3." },
+    "expiration": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "Unix epoch milliseconds. Present only when the EXPIRATION tag (6) was present." },
+    "range_end": { "type": "string", "contentEncoding": "base64", "description": "Required when op == DeleteRange (TLV tag 7)." },
+    "txn_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "Present when part of a transaction (TLV tag 8)." },
+    "compression": { "$ref": "value-encoding.schema.json", "description": "Present only when VALUE is compressed (TLV tag 9)." },
+    "writer_epoch": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "TLV tag 10. Required on every record." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "op": { "const": "DeleteRange" } } },
+      "then": {
+        "required": ["range_end"],
+        "not": { "anyOf": [{ "required": ["value"] }, { "required": ["compression"] }] }
+      }
+    },
+    {
+      "if": { "properties": { "op": { "enum": ["Put", "Insert"] } } },
+      "then": {
+        "required": ["value"],
+        "not": { "required": ["range_end"] }
+      }
+    },
+    {
+      "if": { "properties": { "op": { "const": "Delete" } } },
+      "then": {
+        "not": { "anyOf": [{ "required": ["value"] }, { "required": ["range_end"] }, { "required": ["compression"] }] }
+      }
+    },
+    {
+      "if": { "properties": { "op": { "enum": ["TxnBegin", "TxnCommit"] } } },
+      "then": {
+        "required": ["txn_id"],
+        "not": { "anyOf": [{ "required": ["value"] }, { "required": ["expiration"] }, { "required": ["range_end"] }, { "required": ["compression"] }] }
+      }
+    },
+    {
+      "if": { "properties": { "op": { "const": "TxnBatch" } } },
+      "then": {
+        "required": ["value", "txn_id"],
+        "not": { "anyOf": [{ "required": ["expiration"] }, { "required": ["range_end"] }, { "required": ["compression"] }] }
+      }
+    },
+    {
+      "if": { "required": ["compression"] },
+      "then": {
+        "required": ["value"],
+        "properties": { "op": { "enum": ["Put", "Insert"] } }
+      }
+    }
+  ]
+}
