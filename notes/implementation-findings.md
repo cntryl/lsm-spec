@@ -3,10 +3,12 @@
 This file is **not part of the specification.** Nothing here is normative, and no
 document under `format/` depends on it.
 
-The specification under `format/` was drafted by comparing two independently built
-storage engines and extracting the format they share. That drafting history is
-recorded here so the specification itself can stand on its own: `format/` states what
-the formats *are*, without reference to any particular implementation.
+The initial specification under `format/` was reconstructed by comparing two
+independently built storage engines. Their code supplied historical and
+interoperability evidence, not normative authority. The resulting specification is
+the source of truth and may deliberately require behavior that one or both engines
+do not currently implement. This drafting history is recorded here so `format/` can
+state what the formats *are* without reference to any particular implementation.
 
 The engines are referred to below as **engine R** (a Rust implementation) and
 **engine C** (a C# implementation). Findings were current as of the audit that

@@ -6,6 +6,19 @@ this spec.
 This repository is the authority for these formats. It defines them in their own
 terms, independently of any implementation.
 
+## Authority and provenance
+
+The specification is being reconstructed from existing implementations, but that is
+research provenance, not an authority relationship. Midge, Pants, and other engines
+provide evidence about historical intent and interoperability; none defines the
+format. Normative requirements flow from this specification to implementations.
+
+When an implementation differs from a sound rule, the implementation must change.
+When investigation shows a rule itself is wrong, the specification must be amended
+deliberately, with rationale and compatibility impact recorded. Normative text must
+not be silently changed merely to match current code. Implementation-specific
+findings belong in `notes/`, which is non-normative.
+
 ## Contents
 
 - **`format/`** — on-disk byte layouts: WAL, SST, manifest, file lease, and the

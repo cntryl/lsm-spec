@@ -12,6 +12,9 @@
 - `conformance/README.md` — conformance requirements.
 
 ### Changed
+- `README.md` and `AGENTS.md` now make the authority direction explicit: existing
+  implementations are research evidence used to reconstruct the formats, while this
+  specification is the normative source of truth implementations must follow.
 - Every `format/*.md` document now defines its rules in its own terms, without
   reference to any particular implementation. Earlier drafts cited implementation
   behavior directly, in place of or alongside the normative rule; that framing has
