@@ -28,8 +28,9 @@
           "content_crc32c": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
           "object_key": {
             "type": "string",
-            "pattern": "^wal/epochs/[0-9]{20}/[0-9]{20}\\.wal$",
-            "description": "Must equal the canonical key derived from this entry's own writer_epoch/segment_id."
+            "pattern": "^[^/]+(/[^/]+)*/epochs/[0-9]{20}/[0-9]{20}\\.wal$",
+            "description": "Must equal the canonical key derived from this entry's own writer_epoch/segment_id, under the deployment's configured root prefix (default 'wal'). See format/wal.md \u00a71.2.1.",
+            "$comment": "The root prefix is deployment-configurable, so this pattern checks only the fixed epochs/{epoch}/{segment}.wal suffix. Equality against the derived canonical key cannot be expressed in JSON Schema and must be checked by the validator."
           }
         }
       }

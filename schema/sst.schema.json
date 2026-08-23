@@ -18,7 +18,7 @@
       "required": ["entry_type", "sequence", "key"],
       "additionalProperties": false,
       "properties": {
-        "entry_type": { "type": "string", "enum": ["Put", "Insert", "Delete", "Merge"] },
+        "entry_type": { "type": "string", "enum": ["Put", "Insert", "Delete"], "$comment": "Merge is RESERVED (sst.md \u00a73.2): readers must decode it, but this writer-output fixture schema rejects it." },
         "sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
         "key": { "type": "string", "contentEncoding": "base64" },
         "value": { "type": "string", "contentEncoding": "base64", "description": "Absent for a Delete entry with value_len == 0; see sst.md §3.4." },
@@ -26,8 +26,13 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "entry_type": { "enum": ["Put", "Insert", "Merge"] } } },
+          "if": { "properties": { "entry_type": { "enum": ["Put", "Insert"] } } },
           "then": { "required": ["value"] }
+        },
+        {
+          "$comment": "A value-bearing Delete is RESERVED (sst.md \u00a73.4): decodable, but never emitted by a conforming writer.",
+          "if": { "properties": { "entry_type": { "const": "Delete" } }, "required": ["entry_type"] },
+          "then": { "not": { "required": ["value"] } }
         }
       ]
     },
@@ -57,7 +62,7 @@
         "block_bloom_handle": { "$ref": "#/$defs/blockHandle" },
         "format_version": { "const": 4 },
         "footer_size": { "const": 84 },
-        "magic": { "const": "0xDB477524_8B80FB57" }
+        "magic": { "const": "0xDB47_7524_8B80_FB57" }
       }
     },
     "meta": {

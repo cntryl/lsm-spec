@@ -1,10 +1,9 @@
 # Write-Ahead Log (WAL) Format
 
-Status: draft, extracted from two independent implementations (a Rust engine and a C#
-engine) for cross-checking. Sections marked "TODO: verify" reflect points where the
-two implementations agree today but the spec author could not find an explicit,
-independent design doc confirming the choice was deliberate (as opposed to
-implementation-shared incidental behavior).
+Status: draft. Sections marked "TODO: verify" record points that are not yet settled;
+they are open questions for this specification, not statements about any particular
+implementation. Requirements are expressed with must / must not / required / should /
+may in the sense of RFC 2119, whether or not they appear in capitals.
 
 ## 1. Overview
 
@@ -55,19 +54,12 @@ A WAL lives under a directory (`wal_dir`) that contains:
 Segment ids are monotonically increasing per WAL instance (`writer_epoch`-scoped in
 cloud-durability configurations, see §1.2).
 
-A legacy/alternate naming pattern `wal_{segment:06}.log` is also recognized by
-segment-id parsing (`wal_000123.log` → `123`). **This is not a second valid name for
-the current active file** — the active file is identified strictly as `wal.log` per
-the bullet above, and the recovery/replay order below (§1.1 "Recovery/replay order")
-only ever looks for `wal.log` in that role — but a reader's segment-id-parsing
-routine must still recognize this pattern when it appears, since it may be present in
-directories written by older code. **Confirmed** against the Rust reference
-implementation's current source: no code path anywhere ever *writes* a file matching
-this pattern (there is no `format!("wal_...")` call in the codebase) — it exists
-purely as a decode-side parsing accommodation. Whether it was ever actually produced
-by a now-removed historical writer version (rather than being purely defensive
-parsing for hypothetical/foreign input) isn't determinable from the current source
-alone — **TODO: verify** against the C# reference implementation and/or git history.
+A reader's segment-id parser must additionally recognize the alternate pattern
+`wal_{segment:06}.log` (`wal_000123.log` → `123`), which may appear in directories
+written by older code. **This is not a second valid name for the active file**: the
+active file is identified strictly as `wal.log`, and the replay order below considers
+only `wal.log` in that role. A conforming writer never produces this pattern; it is
+recognized on decode only, so that directories carrying it remain readable.
 
 #### Recovery/replay order
 
@@ -91,11 +83,11 @@ does change what "durable" and "authoritative" mean. This layer is describable a
   segment id:
 
   ```
-  wal/epochs/{writer_epoch:020}/{segment_id:020}.wal
+  {root}/epochs/{writer_epoch:020}/{segment_id:020}.wal
   ```
 
-  (the `wal/` prefix is a deployment-configurable root; `epochs/{epoch}/` and the
-  zero-padded segment filename are the fixed parts of the layout).
+  `{root}` is a deployment-configurable prefix, `wal` by default; `epochs/{epoch}/`
+  and the zero-padded segment filename are the fixed parts of the layout.
 
   **This is a real constraint on what may be uploaded, not just a naming
   convention:** because the object key names exactly one `writer_epoch`, the byte
@@ -159,8 +151,11 @@ Validity constraints on decode:
   of that same entry's own `segment_id` field — a mismatch (e.g. key `"42"` on an
   entry whose `segment_id` is `99`) is corruption, not a warning.
 - Every entry's `object_key` must exactly equal the canonical
-  `wal/epochs/{writer_epoch:020}/{segment_id:020}.wal` key derived from its own
-  `segment_id`/`writer_epoch` — a mismatch is corruption, not a warning.
+  `{root}/epochs/{writer_epoch:020}/{segment_id:020}.wal` key derived from its own
+  `segment_id`/`writer_epoch`, where `{root}` is the deployment's configured prefix
+  (§1.2; `wal` by default) — a mismatch is corruption, not a warning. Because the
+  root is deployment-configured, a validator must compare against the root the
+  catalog was loaded under rather than assuming the default.
 - A segment's declared `size_bytes` and `content_crc32c` are a whole-object checksum
   (CRC32C over the entire uploaded segment byte stream) used to validate a downloaded
   object before trusting it for recovery, on top of the per-frame CRC32C described in
@@ -186,10 +181,10 @@ do, this is the compatibility surface.
 Every record is written to the WAL file as a length-prefixed, checksummed frame:
 
 ```
-+------------------+------------------+----------------------------+
-| payload_len (u32)| crc32c (u32)     | payload (payload_len bytes)|
-| offset 0..4       | offset 4..8      | offset 8..(8+payload_len)  |
-+------------------+------------------+----------------------------+
++-------------------+--------------+-----------------------------+
+| payload_len (u32) | crc32c (u32) | payload (payload_len bytes) |
+| offset 0..4       | offset 4..8  | offset 8..(8+payload_len)   |
++-------------------+--------------+-----------------------------+
 ```
 
 | Field | Size | Byte order | Description |
@@ -212,8 +207,8 @@ Constants:
 - The checksum protects only the payload; the header (length + checksum fields
   themselves) is not separately checksummed. A corrupted `payload_len` that still
   happens to point at a byte range whose CRC matches by chance is a residual risk
-  common to length-prefixed logs; both known implementations accept this trade-off
-  (no header CRC / no magic number in the frame header — see §3.1).
+  common to length-prefixed logs, and this format accepts it: there is no header
+  CRC and no magic number in the frame header (see §3.1).
 
 ### 3.1 No magic number or version at the frame level
 
@@ -225,12 +220,11 @@ frame layer alone cannot distinguish "valid frame of an unknown future format" f
 forward-compatibility mechanism, and why recovery logic that needs to search for a
 resynchronization point (§5.3) scans for the payload magic, not a frame magic.
 
-**TODO: verify** whether a future format revision should add a frame-level magic/
-version to allow multiplexing incompatible payload encodings within one physical
-frame stream, or whether the payload-level magic is considered sufficient
-permanently. Both current implementations use the no-frame-magic design; this is
-recorded as intentional-by-consensus rather than as an oversight, but it has not been
-tested against a real forward-incompatible payload version bump.
+**TODO: verify** whether a future revision should add a frame-level magic/version to
+allow multiplexing incompatible payload encodings within one physical frame stream, or
+whether the payload-level magic is sufficient permanently. The no-frame-magic design
+is deliberate, but it has never been exercised against a forward-incompatible payload
+version bump.
 
 ### 3.2 Zero-length payloads
 
@@ -243,14 +237,14 @@ not a framing one — see §4.
 
 ### 4.1 Single-record payload: magic + version + TLV
 
-A frame's payload (for anything other than an atomic transaction batch — see §4.4 for
-that variant nested inside this same envelope) is encoded as:
+Every frame payload — including that of an atomic transaction batch, whose nested
+structure (§5.4) is carried *inside* this envelope as a TLV value — is encoded as:
 
 ```
-+--------+---------+----------------------------------+
-| magic  | version | TLV-encoded fields (repeated)     |
-| 2 bytes| 1 byte  |                                    |
-+--------+---------+----------------------------------+
++---------+---------+-------------------------------+
+| magic   | version | TLV-encoded fields (repeated) |
+| 2 bytes | 1 byte  |                               |
++---------+---------+-------------------------------+
 ```
 
 | Field | Size | Value |
@@ -300,18 +294,18 @@ TLV header is 5 bytes (`1 + 4`), followed by `len` bytes of value.
 | 2 | `CF_ID` | yes | 4 bytes, u32 LE | Column-family / keyspace identifier the operation applies to. |
 | 3 | `SEQ` | yes | 8 bytes, u64 LE | Sequence number assigned to this record. |
 | 4 | `KEY` | yes | variable | Key bytes (or range-start for a range-delete). May be zero-length. |
-| 5 | `VALUE` | no | variable | Value bytes for a value-write operation. Presence (even of a zero-length value) is semantically distinct from absence — see §5.1. When compressed (see tag 9), holds the compressed bytes. |
+| 5 | `VALUE` | no | variable | Value bytes for a value-write operation, or the nested batch payload of a `TxnBatch` record (§5.4). Presence (even of a zero-length value) is semantically distinct from absence — see §5.1. When compressed (see tag 9), holds the compressed bytes. |
 | 6 | `EXPIRATION` | no | 8 bytes, u64 LE | Optional TTL/expiration timestamp, Unix epoch milliseconds. |
 | 7 | `RANGE_END` | no | variable | Exclusive end key for a range-delete operation. |
 | 8 | `TXN_ID` | no | 8 bytes, u64 LE | Transaction identifier, present when the record is part of a transaction. |
-| 9 | `COMPRESSION` | no | 1 byte | Compression algorithm applied to `VALUE`, if any. Algorithm ID meanings are defined once, shared with other formats (e.g. SST blocks), in [`value-encoding.md`](value-encoding.md). |
+| 9 | `COMPRESSION` | no | 1 byte | Compression algorithm applied to a value-write record's `VALUE`, if any. Permitted only on `Put`/`Insert`; see §5.4 for its exclusion from `TxnBatch`. Algorithm ID meanings are defined once, shared with other formats (e.g. SST blocks), in [`value-encoding.md`](value-encoding.md). |
 | 10 | `WRITER_EPOCH` | yes | 8 bytes, u64 LE | Fencing epoch of the writer that produced this record. Required on every record (not just transactional ones). |
 
 All multi-byte integers in TLV values are **little-endian**.
 
-Both implementations examined require `OP`, `CF_ID`, `SEQ`, `KEY`, and
-`WRITER_EPOCH` unconditionally; everything else is optional and its presence/absence
-carries meaning per §5.
+`OP`, `CF_ID`, `SEQ`, `KEY`, and `WRITER_EPOCH` are required unconditionally on every
+record; everything else is optional, and its presence or absence carries meaning per
+§5.
 
 ### 4.3 Encoding notes (non-normative but relevant to compatibility)
 
@@ -320,12 +314,11 @@ carries meaning per §5.
   that doesn't understand a given compression byte cannot safely decode the value —
   this makes the compression scheme part of the effective compatibility surface even
   though it's logically a value-codec concern layered on top of the WAL TLV format.
-  The threshold for "worth compressing" is a minimum input size — confirmed as
-  `MIN_COMPRESSION_INPUT_BYTES = 256` bytes in the Rust reference implementation,
-  shared with the SST compression path (see
-  [`value-encoding.md`](value-encoding.md#1-compression-algorithm-ids)); this
-  threshold is a writer-side heuristic, not a format requirement — a reader must
-  accept both compressed and uncompressed values regardless of size.
+  The threshold for "worth compressing" is a minimum input size, shared with the SST
+  compression path (see
+  [`value-encoding.md`](value-encoding.md#1-compression-algorithm-ids)). It is a
+  writer-side heuristic, not a format requirement — a reader must accept compressed
+  and uncompressed values of any size.
 - Presence of `VALUE` as an empty (zero-length) TLV is a legitimate, distinct wire
   state from `VALUE` being entirely absent (used to represent "Put with an empty
   string value" vs. "Delete/no value").
@@ -338,7 +331,7 @@ carries meaning per §5.
 |---|---|---|---|
 | 0 | `Put` | value write | Upsert `KEY` → `VALUE` at `SEQ`. `VALUE` required. |
 | 1 | `Insert` | value write | Same wire/replay semantics as `Put` at the WAL layer; the distinction (e.g. insert-only conflict semantics) is an engine-level API concern, not a WAL-format concern — the WAL treats `Put` and `Insert` identically during replay. |
-| 2 | `Delete` | point delete | Tombstone `KEY` at `SEQ`. `VALUE` absent. |
+| 2 | `Delete` | point delete | Tombstone `KEY` at `SEQ`. `VALUE` MUST NOT be present (nor, therefore, `COMPRESSION`); a `Delete` record carrying either is corrupt. [`sst.md`](sst.md) §3.4 depends on this rule. |
 | 3 | `DeleteRange` | range delete | Tombstone the half-open range `[KEY, RANGE_END)` at `SEQ`. `RANGE_END` required. |
 | 4 | `TxnBegin` | transaction-begin marker | Marks the start of a (legacy-style, non-atomic-frame) transaction identified by `TXN_ID`. Carries no direct mutation. |
 | 5 | `TxnCommit` | transaction-commit marker | Marks the transaction identified by `TXN_ID` as committed; on replay this is the trigger to apply all operations buffered since the matching `TxnBegin`. Carries no direct mutation of its own. |
@@ -387,15 +380,12 @@ the wire format, and a recovering reader must support both:
   transaction is valid and is applied entirely) or it doesn't (in which case, per §6,
   it is either the very last frame in the active file — treated as an incomplete tail
   and dropped — or it is mid-stream corruption, a hard error).
-- This is the preferred/current encoding for ordinary-sized transactions; legacy
-  split-marker transactions remain supported for reading older data, **and are also
-  still an actively-emitted current-writer path, not merely legacy-read
-  compatibility**: the Rust reference implementation falls back to split-marker
-  framing (`TxnBegin` / individual ops / `TxnCommit`) for a transaction too large to
-  buffer as a single atomic `TxnBatch` frame (a "spill" path). A from-scratch writer
-  that only ever emits `TxnBatch`, and treats split-marker purely as a read-path
-  concern, will diverge from the reference implementation's behavior on oversized
-  transactions.
+- This is the preferred encoding for ordinary-sized transactions. Split-marker
+  framing is **not** merely a read-path compatibility concern: it remains an
+  actively emitted writer path for transactions too large to buffer as a single
+  atomic `TxnBatch` frame — the "spill" path. A writer that emits only `TxnBatch`
+  cannot represent a transaction larger than one frame, and will diverge from
+  conforming writers on oversized transactions.
 
 Nested transaction markers (a batch containing another `TxnBegin`/`TxnCommit`/
 `TxnBatch`) are invalid and must be rejected.
@@ -425,10 +415,10 @@ Followed by exactly `op_count` nested operation records, each encoded as (not TL
 this is a dedicated fixed+length-prefixed layout, distinct from §4.1's TLV scheme):
 
 ```
-+-----+--------+---------+-----------+---------------------------+-----------------------------+---------------------------------+
-| op  | cf_id  | seq     | exp_flag  | [exp: u64]  key (len+bytes)| value: flag + [len+bytes]   | range_end: flag + [len+bytes]   |
-|1byte|4 bytes |8 bytes  | 1 byte    |                            |                              |                                  |
-+-----+--------+---------+-----------+---------------------------+-----------------------------+---------------------------------+
++--------+---------+---------+----------+----------------------------+---------------------------+-------------------------------+
+| op     | cf_id   | seq     | exp_flag | [exp: u64] key (len+bytes) | value: flag + [len+bytes] | range_end: flag + [len+bytes] |
+| 1 byte | 4 bytes | 8 bytes | 1 byte   |                            |                           |                               |
++--------+---------+---------+----------+----------------------------+---------------------------+-------------------------------+
 ```
 
 Field-by-field:
@@ -450,11 +440,9 @@ accounting for actual key/value/range-end content. The `value` and `range_end`
 presence flags are each a mandatory 1 byte regardless of whether their optional
 length+bytes follow (see the field table above) — both must be included when
 computing this minimum. A decoder must use this minimum to bound `op_count` against
-remaining bytes *before* attempting a per-record allocation, to avoid a small buffer
-causing an attempted huge allocation from an attacker-/corruption-controlled
-`op_count`. (**Confirmed**: the Rust reference implementation's own minimum-record-
-length constant is computed as this same 7-term sum and equals 20, used for the
-identical anti-huge-allocation guard.)
+remaining bytes *before* attempting a per-record allocation, so that a
+corruption- or attacker-controlled `op_count` cannot induce a large allocation from
+a small buffer.
 
 Trailing bytes after the last nested record (i.e. input not fully consumed) is
 corruption.
@@ -463,6 +451,12 @@ Cross-checks a decoder must perform against the **outer** record (in addition to
 inner-payload self-consistency above):
 - outer `TXN_ID` == inner `txn_id`
 - outer `SEQ` == inner `commit_seq`
+
+The nested batch payload is never compressed: `COMPRESSION` (tag 9) applies only to a
+value-write record's `VALUE` (§4.2), so a `TxnBatch` record carrying that tag is
+corrupt. Nested operation values inside the batch have no compression field of their
+own and are likewise always stored raw. **TODO: verify** whether both reference
+implementations enforce this on decode, or merely never emit it.
 
 ## 6. Recovery semantics: valid vs. torn/corrupt tail
 
@@ -516,11 +510,12 @@ metadata, etc. — is corruption. Two supported reader policies for what happens
   availability; it must not be the default, and a caller choosing it is accepting a
   potential silent gap in durability from the corruption point onward.
 
-Both policies must, before discarding anything, distinguish "corrupt length field that
-happens to hide real recoverable data right after it" (§6.3) from "corrupt length
-field with nothing salvageable after it" — the former is escalated to a hard error
-even under Strict-adjacent handling of the final-active-file tail case, because
-silently dropping *verifiable* trailing data is worse than failing loudly.
+Under either policy, a reader must run the §6.3 verified-suffix check before
+discarding a tail, to separate "corrupt length field hiding recoverable data after it"
+from "corrupt length field with nothing salvageable after it." The former is always a
+hard error, including in the final-active-file tail case that §6.1 would otherwise
+tolerate: silently dropping independently verifiable data must never be the outcome of
+a tolerance rule intended for genuine partial writes.
 
 ### 6.3 Verified-suffix detection (guards against a corrupted length field)
 
@@ -546,11 +541,10 @@ than one writer generation:
 
 1. Recovery performs an initial pass to discover, per file in replay order, the
    lowest sequence number and lowest replay-ordinal position at which each observed
-   `writer_epoch` first appears. `writer_epoch == 0` is treated as unfenced/not
-   participating in this mechanism. **Confirmed** against the Rust reference
-   implementation: `writer_epoch == 0` is deliberately special-cased as an
-   epoch-fencing-disabled sentinel in exactly the two places that matter (recording
-   a frontier, and testing staleness) — not an incidental unset-field default.
+   `writer_epoch` first appears. `writer_epoch == 0` is treated as unfenced and does
+   not participate in this mechanism: it is a reserved sentinel meaning "fencing
+   disabled," not an unset-field default, and it is excluded both from frontier
+   recording and from staleness testing.
 2. A record from writer epoch *E* is considered **stale** (skipped, not applied,
    still counted separately in recovery stats) if there exists some other epoch
    *E' > E* whose first-seen sequence number is `<=` this record's sequence number,
@@ -559,7 +553,7 @@ than one writer generation:
    record whose effect could conflict with or be superseded by them is dropped. The
    "ordinal" is a single counter spanning the whole logical replay stream (all
    sealed segments in ascending order, then the active file), never reset between
-   files — confirmed against the reference implementation.
+   files.
 3. **Epoch-mixing within a single physical local WAL file (active or sealed) is
    normal, not corruption, and must not be rejected.** This format's active file is
    reopened in append mode across a writer failover, not rotated at the epoch
@@ -579,20 +573,8 @@ than one writer generation:
    that's a constraint on what a writer chooses to upload, not on what a local file
    may contain.)
 
-   *(Spec correction: an earlier draft of this document stated the opposite here —
-   that a file mixing more than one epoch is corruption. That was wrong, not merely
-   unconfirmed: it directly contradicts the append-on-reopen recovery model this
-   same document describes elsewhere, and enforcing it as written would break
-   ordinary failover recovery. Confirmed against the Rust reference implementation:
-   its primary local-recovery path correctly tolerates epoch-mixing via staleness
-   alone and is proven correct by a passing test that interleaves two epochs in one
-   file and replays successfully — that behavior is what this document now
-   specifies. The reference implementation does separately enforce single-epoch
-   validation in two narrow helpers reachable only from the cloud-upload/download
-   path, which is the real, narrower requirement now captured in §1.2. The C#
-   engine independently corroborates the same design — it also reopens its active
-   WAL file in place across a failover rather than rotating it, with no
-   epoch-mixing rejection anywhere in its local recovery path.)*
+   Single-epoch validation belongs only to the cloud-upload path (§1.2), never to
+   local recovery.
 4. `max_epoch_seen` (the highest writer epoch observed anywhere during recovery) is
    surfaced to the caller so the engine can resume issuing new writes starting at an
    epoch higher than anything seen.
@@ -636,55 +618,20 @@ correctly implement §3–§6:
   *detection* rules (§6.1–§6.3). Out of scope: which of the two responses a given
   deployment chooses.
 
-Ambiguous / needs a decision when writing the canonical spec:
+Open questions:
 
-- **Confirmed, and revised** — The legacy split-marker transaction encoding (§5.3a)
-  is not a deprecated/read-only compatibility path: the Rust reference
-  implementation actively writes it today, as the fallback for transactions too
-  large to encode as a single atomic `TxnBatch` frame. A conforming writer that
-  wants interop with data produced by that implementation must be able to *emit*
-  split-marker transactions, not merely decode them.
-- **Resolved** — The minimum-value-size compression threshold (256 bytes, §4.3) is
-  confirmed purely an internal writer heuristic with no reader-visible consequence
-  — a reader must accept compressed or uncompressed values of any size regardless.
-  Kept as the note in §4.3 and in `value-encoding.md`, not elevated to a normative
-  invariant here, per this entry's own original recommendation.
-- **Confirmed** — `writer_epoch == 0` is a deliberate reserved/sentinel value
-  meaning "fencing disabled" in the Rust reference implementation (see §6.4 point
-  1), not an artifact of default-value handling. Recommend the canonical spec adopt
-  this as a normative reserved value rather than leaving it ambiguous.
-- **TODO: verify** — The frame-header-has-no-magic design (§3.1) as a permanent
-  decision vs. an area open for the shared spec to change, given both known
-  implementations agree today but a real forward-incompatible payload-version bump
-  has apparently never been exercised in practice.
-- **Requirement, confirmed as a gap in the Rust reference implementation** — the
-  format's fencing guarantee (§6.4) only holds if every WAL record a given
-  `writer_epoch` ever produces genuinely postdates, in ordering terms, every record
-  already durable under any lower epoch. This document's source, `lease.md` §4 step
-  4, is where that invariant is actually enforced: a lease acquisition's newly
-  granted epoch must be at least `max_epoch_seen` from this engine's own WAL/
-  manifest recovery pass, not merely `1 +` whatever the lease file happened to
-  record. `writer_epoch` is then seeded verbatim from that granted epoch at engine
-  startup and never reassigned afterward — so if the lease-acquisition step doesn't
-  enforce the invariant, nothing downstream will catch a violation.
+- **TODO: verify** — Whether the frame header's lack of a magic/version (§3.1) is a
+  permanent decision or open for revision. No forward-incompatible payload-version
+  bump has ever been exercised against it.
 
-  Confirmed against both reference implementations: the C# engine actually
-  implements this (`MidgeFileLease.Acquire` takes a `minimumEpoch` parameter,
-  threaded from a public `minimumWriterEpoch` argument on its top-level
-  `Open(...)` API), settling that the mechanism is a real, deliberate,
-  cross-implementation design element and not a spec artifact. The Rust engine
-  does **not** implement it: its lease-acquisition API takes no equivalent
-  parameter at all, WAL replay's `max_epoch_seen` (point 4 above) is computed but
-  never fed back into (or even reachable from) lease acquisition, and lease
-  acquisition completes in full *before* WAL replay runs at all. This is a real
-  gap to close in the Rust reference implementation, not a reason to relax the
-  requirement: see `lease.md` §4 step 4 for the recommended fix (add the
-  equivalent parameter to midge's own API surface, giving a caller with
-  out-of-band epoch knowledge the same capability the C# engine's callers already
-  have) and for the caveat that even the C# engine's default (`0`) leaves this
-  unprotected unless some caller actually supplies a non-default value.
-
-  In a cloud deployment, the same `lease.epoch()` value also seeds the WAL
-  catalog's `fencing_epoch` (§1.2/§1.2.1) — so lease `epoch`, local `writer_epoch`,
-  and cloud `fencing_epoch` are all one number by construction, and the gap above
-  applies to all three simultaneously.
+Cross-document dependency, stated here because it is invisible from within this
+document: the fencing guarantee of §6.4 holds only if every record a given
+`writer_epoch` produces genuinely postdates every record already durable under a
+lower epoch. Nothing in the WAL format enforces that. It is established at lease
+acquisition (`lease.md` §4 step 4), which must floor a newly granted epoch at the
+`max_epoch_seen` recovered from this engine's own WAL and manifest rather than
+merely incrementing whatever the lease file recorded. `writer_epoch` is seeded from
+that granted epoch once at startup and never reassigned, so a violation at
+acquisition time is detected nowhere downstream. In cloud deployments the same value
+also seeds the catalog's `fencing_epoch` (§1.2, §1.2.1): lease `epoch`, local
+`writer_epoch`, and cloud `fencing_epoch` are one number by construction.

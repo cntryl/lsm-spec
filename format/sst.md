@@ -1,12 +1,12 @@
 # Sorted String Table (SST) Format
 
-Status: draft, extracted from two independent implementations (a Rust engine and a C#
-engine) for cross-checking. Sections marked "TODO: verify" reflect points where the
-two implementations agree today but the spec author could not find an explicit,
-independent design doc confirming the choice was deliberate (as opposed to
-implementation-shared incidental behavior). This document assumes familiarity with
-[`wal.md`](wal.md) and reuses shared primitives from
-[`value-encoding.md`](value-encoding.md) rather than redefining them.
+Status: draft. Sections marked "TODO: verify" record points that are not yet settled;
+they are open questions for this specification, not statements about any particular
+implementation. Requirements are expressed with must / must not / required / should /
+may in the sense of RFC 2119, whether or not they appear in capitals.
+
+This document assumes familiarity with [`wal.md`](wal.md) and reuses shared
+primitives from [`value-encoding.md`](value-encoding.md) rather than redefining them.
 
 ## 1. Overview
 
@@ -20,21 +20,21 @@ followed by a small number of **accelerator/metadata blocks**, followed by a
 fixed-size **footer** at the very end of the file:
 
 ```
-+-------------------+-------------------+-----+-------------------+
-| data block 0      | data block 1      | ... | data block N-1    |
-+-------------------+-------------------+-----+-------------------+
-| range-tombstone block (optional)                                |
-+-------------------------------------------------------------------+
-| trie block (optional)                                            |
-+-------------------------------------------------------------------+
-| block-bloom block                                                 |
-+-------------------------------------------------------------------+
-| meta block (SstMetadata)                                          |
-+-------------------------------------------------------------------+
-| index block                                                       |
-+-------------------------------------------------------------------+
-| footer (fixed 84 bytes)                                            |
-+-------------------------------------------------------------------+
++------------------+------------------+-----+------------------+
+| data block 0     | data block 1     | ... | data block N-1   |
++------------------+------------------+-----+------------------+
+| range-tombstone block (optional)                             |
++--------------------------------------------------------------+
+| trie block (optional)                                        |
++--------------------------------------------------------------+
+| block-bloom block (optional)                                 |
++--------------------------------------------------------------+
+| meta block                                                   |
++--------------------------------------------------------------+
+| index block                                                  |
++--------------------------------------------------------------+
+| footer (fixed 84 bytes)                                      |
++--------------------------------------------------------------+
 ```
 
 A reader locates every block in the file by first reading the fixed-size footer at
@@ -51,8 +51,8 @@ key.
 
 ### 1.1 What an SST does *not* store
 
-- No embedded checksums per data block region beyond the whole-block compression
-  trailer described in §2.3 — there is no separate per-entry checksum.
+- No checksums within a data block beyond the whole-block compression trailer
+  described in §5.2 — there is no per-entry checksum.
 - No transaction/commit framing (that lives in the WAL). An SST entry only carries a
   single sequence number and operation type; multi-key atomicity is a WAL/memtable
   concept that has already been resolved by the time entries are flushed into an SST.
@@ -69,7 +69,6 @@ key.
 | Block-bloom block | An optional block holding one Bloom filter per data block, for cheap negative point-lookups (§4.3). |
 | Meta block | A block holding SST-level metadata: format version, chosen index kind, optional range-tombstone block handle, optional key-range bounds (§6). |
 | Footer | The fixed-size trailer at EOF that a reader reads first, giving it the handles needed to locate the meta and index blocks (and, indirectly, everything else) (§7). |
-| Restart point | A block-local point, once every `RESTART_INTERVAL` entries, where prefix compression resets by design so a reader can seek into the middle of a block without decoding entries from the start (see §3.3 — **TODO: verify** current wire use). |
 
 ## 3. Data block format
 
@@ -82,8 +81,8 @@ trailing restart-offset array inside the block itself (contrast with some other 
 block formats, e.g. classic SSTable/RocksDB block footers) — **TODO: verify** whether
 this is intentional (index-block-driven seeks make an in-block restart array
 unnecessary because the accelerator structures in §4 always resolve to a specific
-data block, then the reader linearly scans that one block) or a simplification that
-both current engines happen to share.
+data block, then the reader linearly scans that one block) or an omission worth
+revisiting.
 
 ### 3.2 Entry encoding
 
@@ -106,19 +105,13 @@ Base header (26 bytes), little-endian:
 **`Merge` (`entry_type = 3`) is RESERVED as of this spec version.** This document
 defines its wire encoding (identical framing to `Put`/`Insert`, so a reader must
 still be able to parse one structurally) but no merge-operator semantics exist yet
-anywhere in this spec set — how multiple `Merge` operands for the same key would
+anywhere in this specification — how multiple `Merge` operands for the same key would
 combine into a resolved value, and whether that resolution happens at read time or
 at compaction time, are both undefined. No operation in [`wal.md`](wal.md)'s `OP`
 registry (§5.1) produces a `Merge` record either, so there is no defined path from a
 conforming WAL writer to a `Merge` SST entry in the first place. **A conforming
 writer MUST NOT emit `entry_type = 3` until a future revision of this spec defines
-merge-operator semantics.** Confirmed against the Rust reference implementation:
-this matches its actual behavior exactly — no production code path (memtable,
-compaction, or flush) ever constructs an entry with `op_type == 3`; the only place
-the byte value `3` is even reachable is a decode-side dispatch table with no live
-caller that passes it. Nothing needs to change in midge here; this reservation
-simply makes that already-correct behavior a spec requirement rather than an
-accident of what nothing currently produces.
+merge-operator semantics.**
 
 A reader MUST treat the extended form as in use if and only if **both**
 `key_delta_len == 0xFFFF` **and** `value_len == 0xFFFFFFFF` hold in the base header
@@ -155,19 +148,8 @@ value length is not *also* exactly 4,294,967,295 at the same time — writing
 decodable under the conjunctive reader rule above, precisely because the reader
 only treats it as "extended in use" when `value_len` is *also* the sentinel.
 
-*(Correction: an earlier version of this document stated the marker values are*
-*"reserved sentinels, not legitimate lengths" categorically, and required a writer*
-*to always promote at exactly 65,535 bytes regardless of value length. That was*
-*stricter than necessary. Confirmed against the Rust reference implementation's*
-*reader: it implements exactly the conjunctive check above, not a single-field*
-*check — meaning a writer that skips promotion at `key_delta_len == 65535` with an*
-*ordinary value length produces perfectly valid, round-trippable output under this*
-*format's actual reader contract. The reference implementation's own writer already*
-*implements close to this precise minimal rule (it separately checks whether the*
-*value length also needs the extended marker before deciding not to promote), so*
-*this correction resolves what an earlier audit pass mischaracterized as a writer*
-*bug — it wasn't a bug relative to the real, working contract, only relative to*
-*this document's previously overstated prose.)*
+An earlier revision of this document stated a stricter, single-field rule; see
+`CHANGELOG.md`.
 
 Following the (base or extended) header:
 
@@ -180,7 +162,7 @@ absent, not merely empty) — see §3.4. All other entry types always carry a va
 region of exactly `value_len` bytes, which may itself be zero-length (a legitimate
 empty value, as opposed to Delete's absent value).
 
-### 3.3 Key-delta (prefix) compression and restart points
+### 3.3 Key-delta (prefix) compression
 
 Keys are stored as the delta relative to the **immediately preceding entry's full
 key in the same block** (`shared_prefix_len` bytes are implicitly copied from that
@@ -189,12 +171,10 @@ block always encodes against an empty "previous key" (i.e. its `shared_prefix_le
 is 0 and its `key_delta` is its full key) — a data block is always independently
 decodable from its own first byte without needing entries from a neighboring block.
 
-`RESTART_INTERVAL = 16` is a defined constant in the Rust reference implementation.
-**Confirmed fully vestigial**: it has no reader-visible semantics today — it is not
-referenced anywhere outside its own declaration, doesn't bound scan-verification
-behavior, and (per §3.1) there is no in-block restart offset table it could govern
-even in principle. Treat the *value* 16 as a historical artifact, not a
-wire-format invariant — see §9.
+This format defines **no restart points**. There is no in-block restart offset table
+(§3.1) and no reader-visible wire structure that a restart interval could govern. A
+writer that maintains one internally, for its own scan loop, produces no
+distinguishing bytes; see §9.
 
 ### 3.4 Tombstones inside a data block
 
@@ -207,17 +187,12 @@ present (even a zero-length one) for any entry type *other than* `Delete`, and f
 **A `Delete` entry with `value_len > 0` is RESERVED as of this spec version.**
 [`wal.md`](wal.md) §5.1 defines the WAL's `Delete` operation as always value-less
 (`VALUE` TLV tag never permitted), and the WAL, via memtable flush, is the only
-mutation source this spec set documents flowing into an SST — so there is no
+mutation source this specification defines flowing into an SST — so there is no
 defined path from a conforming WAL writer to a value-bearing `Delete` SST entry.
 **A conforming writer MUST NOT set `value_len > 0` on a `Delete` entry** until a
 future revision of this spec defines a use for it; a reader must still decode the
 wire state correctly (per §3.2's general rule) for forward compatibility with a
-future revision that does define one. Confirmed against the Rust reference
-implementation: this matches its actual behavior — the codec can structurally
-encode/decode it, but every production writer path (memtable delete, compaction
-tombstone emission) is incapable of attaching a value to a delete in the first
-place, since the in-memory tombstone representation has no value field to carry
-one. Nothing needs to change in midge here.
+future revision that does define one.
 
 ## 4. Accelerator and index structures
 
@@ -283,10 +258,10 @@ against each candidate child's key delta.
 
 A conformant trie is validated as a proper tree before use: exactly one inbound edge
 per non-root node, zero inbound edges to the root, no cycles, no unreachable nodes,
-and every non-root node has a non-empty `key_delta`. A block-bloom or index-block
-byte corruption is separable from a structurally-invalid trie graph — both are
-treated as `Corruption`, but graph-shape validation happens independently of
-checksum validation.
+and a non-empty `key_delta` on every non-root node. Graph-shape validation is
+independent of checksum validation — a block whose trailer checksum verifies may
+still decode to a structurally invalid graph. Both failures are reported as
+`Corruption`.
 
 ### 4.3 Block-bloom block (optional)
 
@@ -305,7 +280,7 @@ and scanning that block:
 (not within the whole file). The per-block Bloom filter's own serialization format
 (hash count, bit-array layout) is an implementation detail of the Bloom filter
 sub-component — **TODO: verify** whether that inner format is itself meant to be
-locked as part of this cross-engine spec or is considered a private accelerator
+locked as part of this cross-implementation contract or is considered a private accelerator
 detail that a conformant reader is allowed to substitute (e.g. a reader without
 Bloom support can simply skip this block entirely and fall back to reading every
 candidate data block, since it is purely a negative-lookup accelerator with no
@@ -331,10 +306,11 @@ The `BlockHandle` recorded for this block (in the index block or the footer) use
   of the wrapper, not the start of the compressed payload).
 - `size`: `4 + payload_len` — the *total* wrapper size, length prefix included.
 
-A reader validates a handle by checking `offset + size <= block_region_end` (the
-footer offset, i.e. everything before the footer itself) and by requiring
-`size >= 4 + BLOCK_TRAILER_SIZE` (5 bytes, see §5.2) as a sanity floor before
-attempting to decode.
+A reader validates a handle by checking `offset + size <= block_region_end` — where
+`block_region_end` is the footer's own starting offset, i.e. the end of everything
+that precedes the footer — and by requiring `size >= 4 + BLOCK_TRAILER_SIZE` (that
+is, at least 9 bytes: the 4-byte length prefix plus the 5-byte trailer of §5.2) as a
+sanity floor before attempting to decode.
 
 ### 5.2 Compression trailer
 
@@ -438,11 +414,9 @@ A reader opens an SST by:
       legacy check, or the last 8 bytes don't equal the magic value either — the
       failure is `Corruption`.
 
-   (**Confirmed** against the Rust reference implementation: this is exactly its
-   footer-loading branch structure — full footer decode is attempted first whenever
-   the file is ≥84 bytes, and the bare-8-byte-magic legacy check runs strictly as a
-   fallback on that failure, never independently or ahead of it. There is no
-   alternate footer-parse call site in the reference implementation.)
+   A reader must not treat the bare-magic check as an independent rule competing
+   with the full footer decode: it runs only as a fallback, only after (a) has been
+   attempted and failed or was impossible.
 4. Validating `format_version == 4` (`CompatibilityError` if not — including
    both older and unknown-future versions; there is no forward-compatible
    best-effort read path).
@@ -450,8 +424,8 @@ A reader opens an SST by:
    `block_bloom_handle`) to read those blocks by direct offset — no further
    sequential scanning of the file is required. `block_region_end` for handle
    bounds-checking purposes is the footer's own starting offset
-   (`file_length - 84`); every block handle in the file must resolve to a byte
-   range strictly within `[0, block_region_end)`.
+   (`file_length - 84`); every block handle in the file must satisfy §5.1's
+   `offset + size <= block_region_end`.
 6. Reading the meta block to learn `index_kind`, whether a range-tombstone block
    is present, and the key range.
 7. Reading the index block to build the sorted `(first_key, handle)` table used for
@@ -505,10 +479,8 @@ correctly implement §1–§8:
   In scope: that the chosen kind is recorded in the meta block and that both index
   representations (§4.1, §4.2) must be correctly readable — a reader must handle
   either kind, but never needs to reproduce the *decision* itself.
-- **Restart interval value tuning** (§3.3): to the extent `RESTART_INTERVAL` governs
-  only a write/scan performance characteristic and not a decodable wire structure,
-  its numeric value is policy, not format. Flagged **TODO: verify** above because it
-  isn't fully confirmed that it has zero reader-visible effect on wire bytes.
+- **Restart interval** (§3.3): a writer's internal restart interval, if it keeps one,
+  governs no decodable wire structure and carries no format-compatibility weight.
 - **Bloom filter false-positive rate / hash-function choice / bits-per-key** for the
   per-block filters in §4.3: writer-side accelerator tuning. A reader that cannot or
   chooses not to interpret the inner Bloom filter format can skip the block-bloom
@@ -518,51 +490,32 @@ correctly implement §1–§8:
   compaction picks: entirely a policy/scheduling concern one layer above the file
   format described here.
 
-Ambiguous / needs a decision when writing the canonical spec:
+**Settled:**
+
+- `Merge` (`entry_type = 3`, §3.2) is reserved as of this spec version: no
+  merge-operator contract exists anywhere in this specification, and no WAL
+  operation produces one. The reservation should be lifted in favor of a real
+  specification, rather than standing indefinitely, once merge semantics are
+  defined.
+- A `Delete` entry with `value_len > 0` (§3.4) is reserved as of this spec version:
+  no defined use case exists for it, and no WAL operation produces one.
+- The extended-length promotion boundary (§3.2): the reader's conjunctive check
+  governs, and the minimal writer requirement follows from it. An earlier revision
+  stated a stricter single-field rule, now withdrawn; see `CHANGELOG.md`.
+
+**Open questions:**
 
 - **TODO: verify** — Whether byte-for-byte compatibility with RocksDB's SST footer
   beyond the shared magic constant (§7) is an actual design goal, or the magic value
   was borrowed opportunistically with no further compatibility intended. This
   matters for whether future footer fields may freely diverge from RocksDB's own
   footer layout.
-- **TODO: verify** — Whether `RESTART_INTERVAL = 16` (§3.3) has any reader-visible
-  wire effect today, given data blocks appear to have no in-block restart-offset
-  table (§3.1). If it truly has none, it should be documented purely as a writer/
-  scan-loop implementation detail with no format-compatibility weight, not as part
-  of this spec's normative sections.
 - **TODO: verify** — Whether the per-block Bloom filter's inner serialization
-  (§4.3) is meant to be locked as a cross-engine wire format, or is intentionally
-  left as a swappable accelerator detail (since ignoring it entirely remains
-  correct, only slower).
-- **TODO: verify** — Whether a future format revision is expected to bump
-  `format_version` past 4 with a defined migration/coexistence story, or whether
-  (as with the V1–V3 -> V4 transition) the expectation is a hard break with export/
-  import as the only supported upgrade path. `docs/development/format-compatibility.md`
-  in the Rust engine's repo documents the V4 transition as exactly that kind of hard
-  break; whether that precedent is meant to generalize to all future bumps is not
-  independently confirmed.
-- **Decided** — `Merge` (`entry_type = 3`, §3.2) is declared reserved as of this
-  spec version (see §3.2's note) rather than left open: no merge-operator contract
-  exists anywhere in this spec set, no WAL operation produces it, and it's
-  confirmed dead code in the Rust reference implementation. Still open: whether a
-  merge-operator concept exists in the C# reference implementation — if so, this
-  reservation should be lifted in favor of a real specification rather than staying
-  reserved indefinitely.
-- **Decided** — A `Delete` entry with `value_len > 0` (§3.4) is declared reserved
-  as of this spec version (see §3.4's note): confirmed never produced by the Rust
-  reference implementation's writer paths, and no defined use case exists for it.
-  Still open: whether the C# reference implementation produces it via some path not
-  covered here, which would mean this reservation needs revisiting rather than
-  standing.
-- **Resolved — this was a spec bug, not an implementation bug.** A previous audit
-  pass flagged the Rust reference implementation's writer as violating an earlier
-  version of §3.2's rule ("`key_delta_len == 0xFFFF` is never a legitimate literal
-  length; a writer must always promote at exactly 65,535 bytes"). On closer
-  inspection that rule itself was wrong: the reference implementation's *reader*
-  requires both `key_delta_len` and `value_len` to match their sentinel before
-  treating a record as extended (a conjunctive check), and the writer's actual
-  behavior (promote when the key delta exceeds 65,535, or equals exactly 65,535
-  *and* the value length also needs the marker) is safely decodable under that
-  real reader contract — not a bug. §3.2/§3.3 have been corrected to state the
-  precise minimal writer requirement this behavior already satisfies, rather than
-  the unnecessarily strict single-field rule. No change needed in midge here.
+  (§4.3) is meant to be locked as a cross-implementation wire format, or is
+  intentionally left as a swappable accelerator detail (since ignoring it entirely
+  remains correct, only slower).
+- **TODO: verify** — Whether a future revision is expected to bump `format_version`
+  past 4 with a defined migration/coexistence story, or whether the expectation is a
+  hard break with export/import as the only supported upgrade path, as the V1–V3 to
+  V4 transition was. Whether that precedent generalizes to all future bumps is
+  unsettled.

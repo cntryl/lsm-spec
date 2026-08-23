@@ -1,16 +1,9 @@
 # Manifest Format
 
-Status: draft, extracted from two independent implementations (a Rust engine and a C#
-engine) for cross-checking. Sections marked "TODO: verify" reflect points where the
-two implementations agree today but the spec author could not find an explicit,
-independent design doc confirming the choice was deliberate (as opposed to
-implementation-shared incidental behavior). *(Note: this document previously stated
-the C# engine only reads manifest state and has no independent writer — as of a
-later audit pass, that's no longer accurate; the C# engine now has its own manifest
-writer too. It remains the newer, less battle-tested of the two implementations, so
-writer-side behavior below is still sourced primarily from the Rust implementation;
-C# is treated as corroborating rather than equally authoritative where the two
-haven't been reconciled.)*
+Status: draft. Sections marked "TODO: verify" record points that are not yet settled;
+they are open questions for this specification, not statements about any particular
+implementation. Requirements are expressed with must / must not / required / should /
+may in the sense of RFC 2119, whether or not they appear in capitals.
 
 ## 1. Overview
 
@@ -63,10 +56,11 @@ WAL segments are (§1.1 of `wal.md`) — the manifest instead uses a **snapshot 
 journal-since-checkpoint** scheme, which serves an analogous "don't replay unbounded
 history" purpose (compaction of the journal, §7) without file rotation.
 
-**TODO: verify** whether `manifest.json` (the legacy mirror) is read by any
-currently-shipping reader path when a snapshot is absent but a journal is present, or
-whether that combination is only reachable via `manifest.snapshot.json` absent +
-`manifest.json` present (i.e., pre-journal-era state) — see §5.1's precedence rule.
+**TODO: verify** whether the combination "no snapshot, but a journal is present" is
+reachable at all, or whether a missing snapshot always implies pre-journal-era state
+in which only `manifest.json` exists. §5.1's precedence rule defines the outcome
+either way; what is unsettled is whether the legacy-mirror-plus-journal case can
+occur in practice.
 
 ## 2. Format version marker
 
@@ -78,6 +72,8 @@ on-disk contract, not just the manifest) is understood by the opening engine:
 midge-format-version=<version>\n
 ```
 
+- `midge-format-version` is a fixed literal key. It must be written and matched
+  verbatim; the name carries no meaning beyond identifying this marker.
 - `<version>` is a decimal, unsigned integer. Current value: **3**.
 - The marker is written once, atomically (temp file + durable rename), the first
   time a fresh database directory is opened. It is never rewritten in place after
@@ -101,20 +97,16 @@ document when `FORMAT` reads 3.
 **This integer is not the same value as, and has no arithmetic relationship to, the
 version fields embedded in individual structures** — e.g. the SST footer's own
 `format_version` (currently **4**, see `sst.md` §6–§7) and the WAL payload
-envelope's `version` byte (currently **1**, see `wal.md` §4.1). All three are real,
-independently-checked version gates today, and a conforming implementation must
-validate each one where it applies; none may be inferred from another. **Confirmed**
-against the Rust reference implementation: `CURRENT_FORMAT_VERSION` (3),
-`SST_FORMAT_V4` (4), and the WAL payload `VERSION` byte (1) are three separate
-constants with no code path anywhere that cross-checks or derives one from another —
-this isn't an oversight this document is flagging as unconfirmed, it's simply how
-the format works today. **TODO: verify** — whether a future bump of the
-directory-level `FORMAT` value is meant to imply anything about the SST/WAL
-sub-format versions (e.g. "`FORMAT` 4 requires SST `format_version >= 5`"), or
-whether these three counters are meant to remain independently-incremented forever.
-Separately unresolved: what changed at each prior `FORMAT` version and whether any
-part of that history is specifically about the manifest's own encoding versus the
-SST/WAL encodings — this isn't answerable from the current source alone.
+envelope's `version` byte (currently **1**, see `wal.md` §4.1). All three are
+independent gates, each checked on its own. A conforming implementation must validate
+every one of them where it applies, and none may be inferred or derived from another.
+
+**TODO: verify** whether a future bump of the directory-level `FORMAT` value is meant
+to imply anything about the SST or WAL sub-format versions (e.g. "`FORMAT` 4 requires
+SST `format_version >= 5`"), or whether the three counters remain independently
+incremented indefinitely. Separately unresolved: what changed at each prior `FORMAT`
+version, and whether any of that history concerned the manifest's own encoding rather
+than the SST or WAL encodings.
 
 ## 3. Terminology
 
@@ -139,10 +131,10 @@ length-prefixed, checksummed record — structurally similar to, but a distinct 
 from, the WAL's frame format (`wal.md` §3):
 
 ```
-+------------------+------------------+---------------------------+------------------+
-| record_type (u8) | payload_len (u32)| payload (payload_len bytes)| crc32 (u32)      |
-| offset 0..1       | offset 1..5      | offset 5..(5+payload_len)  | trailing 4 bytes |
-+------------------+------------------+---------------------------+------------------+
++------------------+-------------------+-----------------------------+------------------+
+| record_type (u8) | payload_len (u32) | payload (payload_len bytes) | crc32 (u32)      |
+| offset 0..1      | offset 1..5       | offset 5..(5+payload_len)   | trailing 4 bytes |
++------------------+-------------------+-----------------------------+------------------+
 ```
 
 | Field | Size | Byte order | Description |
@@ -154,11 +146,10 @@ from, the WAL's frame format (`wal.md` §3):
 
 Note the checksum algorithm difference from the WAL: the manifest journal uses plain
 CRC-32 (the `crc32fast` crate's default, i.e. the classic zlib/gzip/IEEE polynomial),
-while the WAL frame format uses CRC32C (Castagnoli). This is a per-structure
-difference in the reference implementation, not an error in this document — the
-manifest journal's checksum is CRC-32 and a conforming implementation must use
-CRC-32 here even though it uses CRC32C for the WAL (`wal.md` §3) and for SST blocks
-(`sst.md` §5.2).
+while the WAL frame format uses CRC32C (Castagnoli). This is a deliberate
+per-structure difference, not an error in this document: a conforming
+implementation must use CRC-32 here even though it uses CRC32C for the WAL
+(`wal.md` §3) and for SST blocks (`sst.md` §5.2).
 
 Unlike the WAL frame header, the record header here has no fixed cap on
 `payload_len` documented at the framing layer (**TODO: verify** whether an implicit
@@ -202,28 +193,22 @@ envelope":
 ```
 
 - `edit_id`: the durable, monotonically increasing identity for this record (§3).
-- `edit`: the actual `ManifestEdit` payload, serialized as a JSON tagged union — the
-  variant name and its fields. **Confirmed** against the Rust reference
-  implementation: `ManifestEdit` carries no `#[serde(tag = ...)]` attribute, so
-  serde's default **externally-tagged** representation applies —
-  `{"VariantName": <fields>}`, e.g. `{"RemoveSst": {"name": "..."}}`,
+- `edit`: the `ManifestEdit` payload, serialized as an **externally tagged** JSON
+  union — `{"VariantName": <fields>}`. For example `{"RemoveSst": {"name": "..."}}`,
   `{"AddSst": {<FileMeta fields, inlined>}}` (a newtype variant inlines its single
-  field's own object), `{"Batch": [<edit>, ...]}`. A from-scratch reimplementation
-  targeting interop with existing journals must reproduce this exact shape, not one
-  of the other conventional Rust-enum-to-JSON shapes (internally-tagged,
-  adjacently-tagged, or untagged).
+  field's own object), and `{"Batch": [<edit>, ...]}`. An implementation must
+  reproduce this shape exactly, not one of the other conventional enum-to-JSON
+  encodings (internally tagged, adjacently tagged, or untagged).
 
 A reader must additionally accept a **legacy payload shape**: the bare `ManifestEdit`
 JSON value with no `edit_id`/`edit` wrapper at all. When a payload fails to parse as
 the envelope shape, a reader falls back to parsing it as a bare edit and synthesizes
-a locally-assigned edit id (one greater than the highest edit id seen so far in the
-replay, computed incrementally during that same forward sequential scan — not via a
-prescan of the file — so the synthesized id is deterministic for a fixed journal but
-depends on scan order rather than being a stable, persisted identity). This lets old
-journals (written before the envelope wrapper existed) remain readable. **Confirmed**
-against the Rust reference implementation: every append path always constructs the
-enveloped shape; the bare shape is a read-only compatibility fallback, never
-produced by a current writer.
+an edit id one greater than the highest seen so far in the replay, computed
+incrementally during that same forward scan rather than by a prescan of the file. The
+synthesized id is therefore deterministic for a fixed journal, but derives from scan
+position rather than being a stable persisted identity. This keeps journals written
+before the envelope wrapper existed readable. A conforming writer always appends the
+enveloped shape; the bare shape is a read-only compatibility target.
 
 `ManifestEdit` variants and their fields (field names as JSON keys; all integers
 JSON numbers, not strings):
@@ -260,16 +245,14 @@ both the new snapshot and a stale journal tail (see §6.3), and idempotent apply
 semantics on every edit variant are what make that race harmless rather than a
 consistency bug.
 
-**Note on `SetCloudCheckpoint`'s comparison operator:** the Rust reference
-implementation's `apply_edit` handler for `SetCloudCheckpoint` advances on `>=`
-(not strict `>`) — a replayed edit whose `checkpoint_sequence` *equals* the current
-value still overwrites `covering_ssts`, unlike `BumpWalSeq`/`BumpNextSstSeq`, which
-both use strict `>`. This is still monotonic-non-decreasing (`checkpoint_sequence`
-itself never regresses), but it means replaying the same `checkpoint_sequence` with
-a different `covering_ssts` list is not a true no-op — the later-applied edit's
-`covering_ssts` wins. Whether this is intentional (`covering_ssts` for a given
-sequence can legitimately be refined/corrected across edits) or an oversight
-relative to the other two counters' strict comparison is **TODO: verify**.
+**Note on `SetCloudCheckpoint`'s comparison operator:** `SetCloudCheckpoint` advances
+on `>=`, not the strict `>` used by `BumpWalSeq` and `BumpNextSstSeq`. A replayed edit
+whose `checkpoint_sequence` *equals* the current value therefore still overwrites
+`covering_ssts`. The sequence itself remains monotonically non-decreasing, but
+replaying an equal `checkpoint_sequence` carrying a different `covering_ssts` list is
+not a true no-op — the later-applied edit wins. **TODO: verify** whether this
+asymmetry is deliberate (allowing `covering_ssts` for a given sequence to be refined
+across edits) or should be tightened to match the other two counters.
 
 ### 4.4 Fsync markers and the durability boundary
 
@@ -358,20 +341,16 @@ JSON/journal parsing succeeded.
 A column family's manifest record (`ColumnFamilyMeta`) moves through these states:
 
 1. **Active**: `deleted_at` absent (null). Newly created via `CreateColumnFamily`.
-   Column family ids are allocated as `1 + max(existing ids)` (id `0` is reserved as
-   the always-present default column family and is never allocated by this
-   mechanism). **Confirmed** against the Rust reference implementation: "`id 0` is
-   the default CF" is *not* asserted anywhere at the manifest/format level — the
-   next-id computation is a plain `max(existing ids) + 1` with no implicit `0`
-   folded in, and id 0 is never given an explicit `ColumnFamilyMeta` record at all.
-   "Reserved for default" is enforced purely as an application-layer convention (the
-   DDL layer rejects creating or dropping id 0 or the name `"default"` directly),
-   not by the manifest format itself — a from-scratch implementation must replicate
-   that application-layer restriction separately if it wants the same guarantee,
-   since nothing in the persisted manifest state stops a hypothetical
-   `CreateColumnFamily{id: 0, ...}` edit from being replayed. Id allocation
-   saturates rather than wraps at `u32::MAX` — an id-space exhaustion is a hard
-   error, not silent reuse.
+   Ids are allocated as `1 + max(existing ids)`, saturating rather than wrapping at
+   `u32::MAX`; id-space exhaustion is a hard error, not silent reuse.
+
+   Id `0` conventionally denotes the always-present default column family, but that
+   reservation is **not** a manifest-format rule. The next-id computation folds in
+   no implicit `0`, id 0 never receives an explicit `ColumnFamilyMeta` record, and
+   nothing in the persisted state prevents a `CreateColumnFamily{id: 0, ...}` edit
+   from being replayed. An implementation wanting that guarantee must enforce it one
+   layer up — rejecting attempts to create or drop id 0, or the name `"default"`, at
+   its DDL layer — because the manifest format will not enforce it.
 2. **Soft-deleted (tombstoned)**: `deleted_at` set to a millisecond timestamp via
    `DropColumnFamily`/`DropColumnFamilyAt`. The column family's id is **never
    reused** even after full reclamation (below) — the tombstone record persists
@@ -440,7 +419,7 @@ Each `FileMeta` entry:
 | `content_crc32c` | u32, optional | no | Whole-file CRC32C, when recorded, used to validate the SST's bytes independent of the manifest journal's own CRC-32 (§4.1) — this checksum is over the *referenced SST file's content*, a different algorithm and a different object than the journal record checksum. |
 | `cf_id` | u32 | no (defaults to 0) | Owning column family id. |
 | `sst_seq` | u64 | no (defaults to 0) | Per-CF monotonic sequence number identifying this file's creation order within its column family; source of the `next_sst_seqs` counter advanced by `BumpNextSstSeq`. |
-| `smallest_key` / `largest_key` | byte array, optional | no | Inclusive key bounds covered by the file, when known. |
+| `smallest_key` / `largest_key` | byte string, optional | no | Inclusive key bounds covered by the file, when known. Keys are arbitrary bytes, so their JSON representation must be pinned down: **TODO: verify** whether this is a JSON array of byte values or a base64 string. `schema/manifest.schema.json` accepts either pending that decision. Until it is settled, two implementations can fail to round-trip these fields against each other. |
 | `smallest_seq` / `largest_seq` | u64, optional | no | Inclusive sequence-number bounds of entries in the file, when known. |
 | `sublevel` | u32 | no (defaults to 0) | Sub-ordering within `level` (e.g. for L0 overlap ordering); semantics beyond "lower sorts first within the level" are **TODO: verify** — not established from the manifest module alone. |
 
@@ -458,7 +437,7 @@ this format document.
 | `column_families` | `[ColumnFamilyMeta]` | All column families ever created, including tombstoned ones; see §5.3. |
 | `cloud_checkpoint` | `CloudCheckpoint`, optional | Cross-references the WAL's cloud-durability layer (`wal.md` §1.2): `checkpoint_sequence` (highest WAL sequence fully materialized to cloud) and `covering_ssts` (the SST names that make that sequence durable without needing the WAL). Omitted entirely from JSON when absent, rather than serialized as null. |
 | `next_wal_seq` | u64, default `1` | Next WAL sequence number to hand out; not the same field as `last_persisted_sequence` — this is a forward-looking allocator counter, not a durability watermark. |
-| `next_sst_seqs` | map `u32 -> u64` | Per-column-family next-SST-sequence allocator counters, keyed by `cf_id`; entries absent from the map default to `0` (i.e. next allocation would be sequence `0`, or whatever the SST layer's own base is — **TODO: verify** the exact base value a missing map entry implies for a fresh CF). |
+| `next_sst_seqs` | map `u32 -> u64` | Per-column-family next-SST-sequence allocator counters, keyed by `cf_id` rendered as a canonical unpadded decimal string (JSON object keys are always strings); entries absent from the map default to `0` (i.e. next allocation would be sequence `0`, or whatever the SST layer's own base is — **TODO: verify** the exact base value a missing map entry implies for a fresh CF). |
 | `edit_checkpoint_id` | u64, default `0` | The journal replay horizon this snapshot already reflects; see §5.2. Absent in manifests written before this field existed, which is why it defaults to `0` (replay everything) on decode — a conservative default that trades a possibly-redundant-but-harmless full replay for never silently skipping edits an old snapshot doesn't actually contain. |
 
 The whole `Manifest` structure is serialized as pretty-printed JSON (not a binary
@@ -514,9 +493,9 @@ writes those bytes to `manifest.journal.repair.tmp`, and atomically renames that
 place as `manifest.journal`. This repair-on-next-write behavior means a journal left
 with an unmarked tail after a crash is self-healing the next time the engine opens
 the database and performs a write — no separate offline repair tool is required by
-the format, though the repair *is* itself part of the reader/writer contract (a
-from-scratch implementation must perform it to remain compatible with concurrent
-writers expecting a clean tail).
+the format, though the repair *is* itself part of the reader/writer contract (an
+implementation must perform it to remain compatible with concurrent writers
+expecting a clean tail).
 
 ### 6.3 Snapshot/journal crash-consistency window
 
@@ -565,28 +544,24 @@ correctly implement §2–§6:
   changes what atomicity a reader observes across a crash — but the *decision* of
   when to batch is policy; the *batch record's* structure and replay-atomicity
   guarantee is format, §4.3.)
-- **Fsync/durability policy for journal appends**: this format assumes (and the
-  reference implementation always performs) an fsync of both the edit record and its
+- **Fsync/durability policy for journal appends**: this format requires an fsync of
+  both the edit record and its
   marker before an append call returns — unlike the WAL, which exposes multiple
   durability policies (`wal.md` §7) that trade off when bytes are synced. **TODO:
-  verify** whether the manifest journal is intended to always be Strict/synchronous
-  by design (since it is comparatively low-volume relative to the data WAL) or
-  whether this is simply the only policy the current implementation has built, with
-  batched/async manifest durability a legitimate future policy variation that
-  wouldn't change this format.
+  verify** whether synchronous durability is required by design here (the manifest
+  being low-volume relative to the data WAL), or whether batched or asynchronous
+  manifest durability is a legitimate future policy variation. Either way it would
+  not change the on-disk format.
 - **Column-family reclamation timing** (exactly when, relative to snapshot pinning
   and compaction scheduling, a `ReclaimColumnFamily` edit is actually appended once a
   dropped family's files become eligible): policy about *when* to reclaim. The
   format only specifies the states a column family passes through and what each
   transition's edit must contain (§5.3).
-- **Concurrent-writer coordination beyond what the format requires for
-  correctness**: the reference implementation uses an in-process, filesystem-
-  coordination-key-striped lock around every manifest read/append/checkpoint
-  operation to serialize them; this is an implementation concurrency-control detail,
-  not a format requirement — the format's crash-consistency guarantees (§6.3) hold
-  regardless of what serializes concurrent writers, as long as *some* mechanism
-  prevents two writers from interleaving bytes within a single journal record
-  append.
+- **Concurrent-writer coordination beyond what correctness requires**: the choice of
+  serialization mechanism (an in-process lock, a filesystem lock, a lease) is an
+  implementation concern. The format's crash-consistency guarantees (§6.3) hold
+  regardless, provided *some* mechanism prevents two writers from interleaving bytes
+  within a single journal record append.
 - **`RecoveryPolicy` (Strict vs. a more permissive "warn and continue with base
   state alone") for journal-replay failures (§5.2)**: like the WAL's
   Strict/SalvageValidPrefix split (`wal.md` §7), this is reader-side policy about
@@ -594,25 +569,24 @@ correctly implement §2–§6:
   scope: the corruption/tolerated-tail classification of §6.1–§6.2. Out of scope:
   which response a given deployment configures.
 
-Ambiguous / needs a decision when writing the canonical spec:
+**Settled:**
 
-- **TODO: verify** — The precise JSON wire shape (tag placement, field naming) for
-  `ManifestEdit`'s tagged-union serialization, needed for a from-scratch
-  reimplementation to byte-for-byte (or at least json-value-for-value) match what a
-  reference writer produces and what a reference reader will accept.
+- `ManifestEdit`'s tagged-union JSON shape is externally tagged
+  (`{"VariantName": <fields>}`); see §4.3, which states the exact shape an
+  implementation must reproduce.
+- The frontier-less `DropColumnFamily` variant is a decode-only compatibility
+  target: a conforming writer appends only `DropColumnFamilyAt`. This is unlike the
+  WAL's legacy split-marker transaction encoding (`wal.md` §5.3a), which remains an
+  actively written path.
+
+**Open questions:**
+
 - **TODO: verify** — Whether `manifest.json` (the legacy full-state mirror) is a
   permanent part of the format contract that every implementation must keep writing,
   or a deprecated compatibility artifact that a new implementation could in
   principle skip writing (while still reading it as a base-state fallback per
   §5.1) without breaking any consumer.
-- **Confirmed** — The legacy split `DropColumnFamily` (no captured frontier/
-  file-set) edit variant is never produced by any current writer in the Rust
-  reference implementation; only `DropColumnFamilyAt` is ever appended.
-  `DropColumnFamily` remains read-only-for-old-journals — unlike the WAL's legacy
-  split-marker transaction encoding (`wal.md` §5.3a), which the same audit found is
-  *still* actively emitted by a live code path (large-transaction spill), not
-  merely historical.
-- **TODO: verify** — The exact semantics implied by an absent entry in
-  `next_sst_seqs` for a given `cf_id` (§5.6) — i.e., what sequence number the SST
-  subsystem actually allocates first for a column family that has never had a
-  `BumpNextSstSeq` edit recorded.
+- **TODO: verify** — What an absent entry in `next_sst_seqs` for a given `cf_id`
+  (§5.6) implies: which sequence number is allocated first for a column family that
+  has never had a `BumpNextSstSeq` edit recorded. Until this is settled, two
+  implementations can disagree on the first SST sequence for a fresh column family.
