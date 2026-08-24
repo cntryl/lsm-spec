@@ -63,6 +63,12 @@
   left this implicit).
 
 ### Corrected (the earlier text was wrong, not merely unconfirmed)
+- `format/sst.md` §5.1/§6/§7 — corrected the optional-block-handle presence rule.
+  The earlier text classified `(offset = 0, size > 0)` as half-present corruption,
+  but offset 0 is the valid location of the first block in an SST. `(0, 0)` remains
+  the absent sentinel; any positive size is present at any offset; only a positive
+  offset paired with zero size is a partially present handle. This is a reader-side
+  compatibility correction and does not change wire bytes.
 - `format/wal.md` §6.4 point 3 — this document previously stated that epoch-mixing
   within one physical WAL file is corruption. That directly contradicts this
   format's own append-on-reopen recovery model: the active file is never rotated at

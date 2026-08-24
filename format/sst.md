@@ -303,8 +303,14 @@ Every block in the file — data, range-tombstone, trie, block-bloom, meta, and 
 The `BlockHandle` recorded for this block (in the index block or the footer) uses:
 
 - `offset`: the file offset of the 4-byte `payload_len` field itself (i.e. the start
-  of the wrapper, not the start of the compressed payload).
+  of the wrapper, not the start of the compressed payload). Offset 0 is valid: it
+  means the block is the first block in the file.
 - `size`: `4 + payload_len` — the *total* wrapper size, length prefix included.
+
+For an optional handle, the pair `(offset = 0, size = 0)` is the sole absent
+sentinel. Any handle with `size > 0` is present, including `(offset = 0, size > 0)`.
+The pair `(offset > 0, size = 0)` is corruption. A reader must not interpret a zero
+offset alone as absence or corruption.
 
 A reader validates a handle by checking `offset + size <= block_region_end` — where
 `block_region_end` is the footer's own starting offset, i.e. the end of everything
@@ -349,7 +355,7 @@ little-endian:
 | `index_kind` | u8 | `0` = `Sparse` (full binary index, §4.1 only), `1` = `Trie` (index block **and** trie block both present, §4.2). Any other value is corruption. |
 | `flags` | u8 | Bit 0: key-range metadata present (§6.1). All other bits must be zero; a nonzero unknown bit is corruption, not a silently-ignored future extension. |
 | *(reserved)* | 2 bytes | Must be zero. |
-| `range_tombstone_handle` | 16 bytes (`offset` u64 + `size` u64) | `BlockHandle` for the range-tombstone block (§8), or all-zero if this SST carries no range tombstones. Half-present (nonzero size with zero offset, or zero size with nonzero offset) is corruption — the pair must be fully present or fully absent. |
+| `range_tombstone_handle` | 16 bytes (`offset` u64 + `size` u64) | `BlockHandle` for the range-tombstone block (§8), or all-zero if this SST carries no range tombstones. Presence follows §5.1: a positive size is present even at offset 0; a positive offset with zero size is corruption. |
 | *(key-range, only if flag bit 0 set)* | variable | See §6.1. |
 
 If the key-range flag is clear, the meta block must end exactly at the fixed 24-byte
@@ -391,6 +397,10 @@ of the file:
 Total footer size: **84 bytes**, always, regardless of which optional handles are
 populated (unused handles are zero-filled, not omitted — the footer never changes
 length).
+
+The optional `trie_handle` and `block_bloom_handle` use §5.1's presence rule:
+`(0, 0)` is absent, a positive `size` is present at any `offset`, and a positive
+`offset` paired with zero `size` is corruption.
 
 ### 7.1 Locating the index from EOF
 

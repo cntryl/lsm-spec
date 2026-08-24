@@ -137,6 +137,26 @@ value length is valid and round-trippable. Both the rule and the finding against
 engine R were withdrawn; `format/sst.md` §3.2 now states the minimal writer
 requirement that follows from the reader's check.
 
+### 2.3 Optional SST block handles at file offset zero
+
+An earlier draft treated both `(offset = 0, size > 0)` and
+`(offset > 0, size = 0)` as partially present optional handles. The first form is
+not intrinsically partial: offset 0 is the valid start of the first block in an SST.
+
+Engine R demonstrates the compatibility consequence with a tombstone-only SST. It
+writes the range-tombstone block before any footer or index structures, so that
+block legitimately has offset 0 and a positive size. Enforcing the earlier rule
+made the reader reject SSTs produced by its own writer and broke compaction and
+cloud-recovery tests.
+
+Engine C writes its block Bloom filter first, preventing its own range-tombstone
+writer from producing an offset-0 handle. Its footer optional-handle decoder already
+accepts offset 0 with a positive size, while its range-tombstone metadata decoder is
+stricter. The corrected rule uses the wire pair's unambiguous semantics rather than
+a writer-specific block order: `(0, 0)` is absent, positive size is present at any
+offset, and positive offset with zero size is corruption. No wire bytes change; the
+correction broadens readers to accept a valid first-block placement.
+
 ## 3. Facts established by cross-implementation agreement
 
 These were confirmed in both engines' source and are stated as plain requirements in
