@@ -4,6 +4,9 @@
 
 - `format/` contains the normative on-disk format specifications for WAL, SST,
   manifests, leases, and shared value encoding.
+- `behavior/` contains normative behavioral contracts such as cloud object-store
+  identity, publication, and recovery semantics. Wire layouts in `format/` remain
+  authoritative for persisted bytes.
 - `schema/` contains JSON Schema projections used to validate decoded fixtures.
   Wire layouts in `format/` remain authoritative.
 - `conformance/` defines interoperability and fixture requirements. No golden
@@ -17,7 +20,7 @@ There is no compilation step or project-specific test runner. Before submitting:
 ```sh
 jq empty schema/*.json       # Parse every JSON Schema file
 git diff --check             # Detect whitespace errors
-rg -n 'TODO: verify' format/ # Review unresolved format questions
+rg -n 'TODO: verify' format/ behavior/ # Review unresolved specification questions
 ```
 
 ## Specification Style & Naming Conventions
