@@ -3,6 +3,8 @@
 ## [Unreleased] — 0.1.0-dev
 
 ### Added
+- `behavior/cloud-storage.md` — identity-pinned cloud ranges, GCS XML request
+  framing, and recovery of proven unpublished compaction outputs.
 - `format/wal.md` — WAL framing, payload encoding, transaction semantics,
   recovery/torn-tail rules, writer-epoch fencing.
 - `format/value-encoding.md` — shared compression-algorithm ID enum.

@@ -25,7 +25,8 @@ findings belong in `notes/`, which is non-normative.
   shared value-encoding primitives they share.
 - **`schema/`** — machine-checkable schema definitions mirroring `format/`.
 - **`behavior/`** — behavioral contracts (conflict resolution, durability windows,
-  recovery semantics). Not yet specified.
+  recovery semantics). Cloud object-store identity and publication recovery are
+  specified in `behavior/cloud-storage.md`.
 - **`conformance/`** — requirements for claiming and verifying conformance.
 - **`notes/`** — non-normative working notes. Not part of the specification.
 
