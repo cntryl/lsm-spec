@@ -26,159 +26,173 @@ whether writes are mirrored to cloud storage synchronously or asynchronously —
 **behavioral/policy**, not format, and is called out explicitly in §7 so implementers
 don't mistake it for a wire-compatibility requirement.
 
-### 1.1 File and segment layout
+### 1.1 Local history: LEDGER and linked segments
 
-A WAL lives under a directory (`wal_dir`) that contains:
+The WAL directory is named `wal`. Its history authority is the `LEDGER` file;
+directory listing order is never authoritative. The directory contains the ledger and
+zero or more segment files named `{segment_id:020}.wal`, with exactly twenty
+zero-padded decimal digits followed by `.wal`. Segment id 42 is
+`00000000000000000042.wal`.
 
-- **One active file**, always named `wal.log` for any directory written by a
-  conforming current writer. This is the only mutable WAL file: frames are appended
-  to it as writes occur. It is never uploaded/shipped to secondary storage as-is
-  (only sealed segments are).
-- **Zero or more sealed segment files**, one per rotation, named as a fixed-width
-  decimal segment id with a `.wal` extension:
+The ledger's members are ordered oldest first. Every member before the last is sealed;
+the last member is the one open segment. A reader replays only members named by the
+ledger, in that order. Unlisted files are not WAL history. Retired members are removed
+only from the oldest prefix; the ledger's `anchor` retains the chain link of the last
+retired segment.
 
-  ```
-  {segment_id:020}.wal
-  ```
+#### 1.1.1 Ledger bytes and authority
 
-  The width is 20 characters (zero-padded), matching the decimal digit count of
-  `u64::MAX` (18446744073709551615), so that lexicographic (string) sort order of
-  filenames equals numeric order of `segment_id`. This matters because object stores
-  and many filesystem APIs only offer lexicographic listing.
+`LEDGER` begins with a 12-byte header:
 
-  Example: segment id `42` → `00000000000000000042.wal`.
+| Offset | Size | Value |
+|---|---:|---|
+| 0 | 8 | ASCII magic `MDGLEDGR` |
+| 8 | 4 | Ledger format version `2`, unsigned little-endian |
 
-- When the active file is rotated (sealed), it is renamed/moved to the next segment
-  id's filename and a new empty `wal.log` is started.
+The header is followed by frames. Each frame is `u32 length LE`, `u32 CRC32C LE`,
+then that many JSON payload bytes. CRC32C covers the four length bytes followed by
+the payload. The first frame must be a `Snapshot`; later frames must be `Edit`
+records that apply to the ledger state. The JSON values use externally tagged enum
+variants: `{"Snapshot": <ledger>}` and `{"Edit": <ledger-edit>}`. A frame that
+cannot be decoded or an edit that cannot apply is corruption, except a damaged final
+frame with no later valid frame, which is a torn tail.
 
-Segment ids are monotonically increasing per WAL instance (`writer_epoch`-scoped in
-cloud-durability configurations, see §1.2).
+The snapshot records the database holder UUID, chain anchor, ordered members,
+`next_segment_id`, and `seq_reserved_through`. A member records its segment header
+facts, optional sealed footer facts, and optional `durable_bytes` boundary. The last
+member must be open; every earlier member must be sealed. The member chain, segment
+ids, sequence ranges, and next id must form a reachable ledger state.
 
-A reader's segment-id parser must additionally recognize the alternate pattern
-`wal_{segment:06}.log` (`wal_000123.log` → `123`), which may appear in directories
-written by older code. **This is not a second valid name for the active file**: the
-active file is identified strictly as `wal.log`, and the replay order below considers
-only `wal.log` in that role. A conforming writer never produces this pattern; it is
-recognized on decode only, so that directories carrying it remain readable.
+Ledger edits are externally tagged JSON variants: `Rotate`, `Reopen`,
+`AdvanceLogStart`, `SetAside`, `Rebase`, `Reserve`, `SyncOpen`, and
+`SalvageOpen`. Unknown variants are rejected. A successful edit is appended and
+synced before the ledger reports it durable. A snapshot is published through
+`LEDGER.tmp`, sync, atomic rename, and directory sync; a torn final edit may be
+discarded, but a damaged snapshot or an invalid edit is corruption. Ledger format
+versions other than 2 are rejected; no migration is defined.
 
-#### Recovery/replay order
+#### 1.1.2 Segment header, records, and footer
 
-On startup, a reader/recovery process must process WAL files in this order:
+Every segment begins with a fixed 128-byte header. All integers are little-endian.
 
-1. Sealed segment files, in **ascending `segment_id` order**.
-2. The active file (`wal.log`), if present, last.
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 8 | Magic `MWSEGHDR` |
+| 8 | 4 | Header version `2` |
+| 12 | 8 | Segment id |
+| 20 | 8 | Writer epoch |
+| 28 | 16 | Holder UUID bytes |
+| 44 | 8 | First sequence allowed in this segment |
+| 52 | 8 | Previous link's segment id |
+| 60 | 8 | Previous link's last sequence |
+| 68 | 16 | Previous link's xxh3-128 digest bytes |
+| 84 | 40 | Reserved zero bytes |
+| 124 | 4 | CRC32C of bytes 0 through 123 |
 
-Within a single file, records are read in the order the frames appear (append order).
-Global logical ordering across the whole WAL is: sealed segments by ascending id, then
-active file, each file read front-to-back.
+Record frames follow the header and use §3 framing with §4 payloads. Writer epoch is
+stored once in the segment header; it is not a per-record TLV. Record sequences
+strictly increase within a segment. Each segment after the first must name the prior
+sealed segment's link, have a greater id, start after the predecessor's last sequence,
+and have a writer epoch no lower than the predecessor's epoch. The holder UUID must
+match the ledger's holder.
 
-### 1.2 Cloud-backed WAL (optional layer)
+A sealed segment ends with one footer frame; no bytes may follow it. Its payload is
+`MF`, footer version `1`, five little-endian u64 values
+(`id`, `record_count`, `first_seq`, `last_seq`, `data_len`), a little-endian
+u32 family count, that many `(cf_id: u32, max_seq: u64)` pairs in strictly
+increasing `cf_id` order, and a 16-byte xxh3-128 digest of every segment byte before
+the footer frame. The footer must agree with the header and all preceding records.
+The sealed facts retained in the ledger and cloud catalog contain the footer link,
+record count, data length, and per-family sequence maxima.
 
-Deployments that mirror the WAL to an object store add a layer on top of the on-disk
-format described here; it does not change the byte format of a frame or record, but it
-does change what "durable" and "authoritative" mean. This layer is describable as:
+### 1.2 Cloud-backed WAL
 
-- **Epoch-scoped immutable segment objects.** A sealed local segment file's bytes are
-  uploaded verbatim to an object key that encodes both a writer fencing epoch and the
-  segment id:
+Cloud deployments store sealed segment bytes under immutable, epoch-scoped keys:
+`wal/epochs/{writer_epoch:020}/{segment_id:020}.wal`. The key's writer epoch and
+segment id must match the segment header. An object is eligible for replay only when
+it is named by the cloud publication catalog; an unlisted object is an orphan and
+must not be treated as history.
 
-  ```
-  {root}/epochs/{writer_epoch:020}/{segment_id:020}.wal
-  ```
+The FORMAT 8 catalog body is format version 3. Its primary object key is
+`wal/publication-catalog.v1.json`; its recovery mirror is
+`wal/publication-catalog.v1.mirror.json`. The `.v1` path component is a stable
+object name and does not state the JSON body's format version. The primary catalog is
+updated with identity-conditional writes under the current fencing lease. The mirror
+is kept synchronized from the confirmed primary body and may repair a missing or
+structurally corrupt primary only when the mirror itself validates. An unsupported
+catalog version or inability to validate because of a resource limit is not
+repairable from the mirror. See
+[`behavior/cloud-storage.md`](../behavior/cloud-storage.md) for object identity,
+conditional mutation, and recovery rules.
 
-  `{root}` is a deployment-configurable prefix, `wal` by default; `epochs/{epoch}/`
-  and the zero-padded segment filename are the fixed parts of the layout.
+Catalog mutations require the caller's writer epoch to equal the catalog's
+`fencing_epoch`. Published segments are an ordered chain. Retirement may remove only
+a sealed oldest prefix and advances `anchor` to the last retired link. The
+`retired_by` field retains the shared metadata generation that authorized that
+retirement, including after every catalog entry is removed. Salvage raises
+`seq_floor` so a sequence in discarded history cannot be assigned again.
 
-  **This is a real constraint on what may be uploaded, not just a naming
-  convention:** because the object key names exactly one `writer_epoch`, the byte
-  range uploaded under it MUST NOT itself mix records from more than one
-  `writer_epoch` — unlike a local on-disk file, which §6.4 point 3 explicitly
-  permits to mix epochs. A writer preparing an upload must guarantee this, e.g. by
-  validating the byte range before upload and refusing/splitting/deferring it if it
-  isn't single-epoch (the exact mechanism is a writer implementation choice; only
-  the invariant — one epoch per uploaded object — is normative here).
+#### 1.2.1 Publication catalog JSON
 
-- **A lease-fenced publication catalog.** A single JSON object (**not the WAL frame
-  format** — see §1.2.1) lists which uploaded segment objects are authoritative for
-  recovery. An uploaded object existing in the object store is *not* sufficient for it
-  to be replayed — only entries present in the catalog are recovered. This lets an
-  uploader whose lease was already revoked finish uploading without corrupting
-  recovery: the orphaned object is simply never cataloged.
-- **Fencing.** The catalog carries a monotonically increasing `fencing_epoch`. Catalog
-  mutations (publish/retire a segment) are rejected unless the caller's writer epoch
-  equals the catalog's current fencing epoch. Advancing the fencing epoch to a newly
-  acquired lease is a precondition for recovery to run, and is separate from the
-  runtime being allowed to advance its durability frontier from a cloud
-  acknowledgment.
+The catalog is compact JSON with this logical shape (digest fields are arrays of
+exactly 16 unsigned bytes):
 
-This two-tier design (immutable content-addressed-by-id segment objects + a small
-authoritative index) is the general contract; the exact transport/API used to store
-the catalog object (e.g., conditional PUT semantics) is object-store-specific and out
-of scope for this document.
+| Field | Shape | Meaning |
+|---|---|---|
+| `format_version` | u32, exactly 3 | Catalog structure version. |
+| `fencing_epoch` | nonzero u64 | Current writer epoch allowed to mutate the catalog. |
+| `anchor` | `ChainLink` | Link of the last retired segment, or the genesis link. |
+| `next_segment_id` | u64 | First id greater than every allocated/published segment id. |
+| `seq_floor` | u64 | Sequences at or below this may have been set aside and must not be reused. |
+| `retired_by` | u64 | Shared metadata generation that authorized the retired prefix; zero means none. |
+| `segments` | array of entries | Published sealed segments, oldest first. |
 
-#### 1.2.1 Publication catalog encoding (JSON, not binary framing)
+Each segment entry has `epoch: u64`, `prev: ChainLink`, `facts: SealedFacts`,
+`size_bytes: u64`, and `crc32c: u32`. `SealedFacts` contains `link`,
+`record_count`, `data_len`, and `max_seq_per_cf`, an array of
+`[cf_id, max_sequence]` pairs. The object key is derived from `epoch` and
+`facts.link.id`; it is not stored in the catalog.
 
-The catalog is encoded as JSON (pretty-printed) with this logical shape:
+A valid catalog must satisfy all of these conditions:
 
-```jsonc
-{
-  "format_version": 1,
-  "fencing_epoch": <u64, non-zero>,
-  "segments": {
-    "<segment_id as string>": {
-      "segment_id": <u64>,
-      "writer_epoch": <u64>,
-      "max_sequence": <u64>,
-      "size_bytes": <u64>,
-      "content_crc32c": <u32>,
-      "object_key": "<string, must equal the canonical epoch-scoped key for (segment_id, writer_epoch)>"
-    },
-    ...
-  }
-}
-```
+- `format_version` is 3 and `fencing_epoch` is nonzero.
+- `anchor` is the genesis link exactly when `retired_by` is zero; a non-genesis
+  anchor requires a nonzero shared metadata generation.
+- Each entry's `prev` equals the preceding link, beginning with `anchor`. Segment
+  ids and last sequences strictly increase, entry epochs do not decrease, and no
+  entry epoch exceeds `fencing_epoch`.
+- Each entry has a nonempty sealed segment: `record_count > 0`, at least one
+  `max_seq_per_cf` row, `data_len >= 128`, and `data_len < size_bytes`.
+  Family ids in `max_seq_per_cf` strictly increase; every maximum is nonzero and no
+  greater than the link's `last_seq`; the greatest family maximum equals
+  `last_seq`; and `record_count` is at least the number of family rows.
+- `next_segment_id` is greater than the head id (the last entry id, or the anchor
+  id when the catalog has no entries).
 
-`<segment_id as string>` is the **canonical, unpadded decimal** representation of the
-u64 `segment_id` (e.g. `"42"`, not `"00000000000000000042"`) — this is a different
-string form than the zero-padded 20-digit segment id used in local segment filenames
-and inside `object_key` above; do not confuse the two.
-
-Validity constraints on decode:
-- `format_version` must equal the currently understood version (`1`).
-- `fencing_epoch` must be non-zero.
-- Every entry's `segment.writer_epoch` must be `<= fencing_epoch`.
-- Every entry's map key must exactly equal the canonical unpadded-decimal string form
-  of that same entry's own `segment_id` field — a mismatch (e.g. key `"42"` on an
-  entry whose `segment_id` is `99`) is corruption, not a warning.
-- Every entry's `object_key` must exactly equal the canonical
-  `{root}/epochs/{writer_epoch:020}/{segment_id:020}.wal` key derived from its own
-  `segment_id`/`writer_epoch`, where `{root}` is the deployment's configured prefix
-  (§1.2; `wal` by default) — a mismatch is corruption, not a warning. Because the
-  root is deployment-configured, a validator must compare against the root the
-  catalog was loaded under rather than assuming the default.
-- A segment's declared `size_bytes` and `content_crc32c` are a whole-object checksum
-  (CRC32C over the entire uploaded segment byte stream) used to validate a downloaded
-  object before trusting it for recovery, on top of the per-frame CRC32C described in
-  §3.
-
-This JSON schema is a control-plane detail specific to cloud-mirrored deployments.
-Engines that do not support cloud WAL durability need not implement it, but if they
-do, this is the compatibility surface.
+A reader must verify a downloaded object against its catalog size and CRC32C, then
+validate the segment header, footer, and chain identity. The catalog's list order and
+links, not cloud listing order, define remote replay order. A retirement must name the
+unchanged oldest prefix it observed and may not regress `retired_by`. Cross-field
+chain, fencing, and shared-generation checks are not fully expressible in JSON Schema
+and must also be enforced by the reader.
 
 ## 2. Terminology
 
 | Term | Meaning |
 |---|---|
-| Frame | The physical unit written to a WAL file: a fixed-size header + a variable-length payload, with an integrity checksum. |
-| Payload | The bytes carried by one frame. Frame concerns (length, checksum) are orthogonal to what the payload bytes mean. |
-| Record | A decoded logical WAL entry: one operation (or transaction marker) with its associated metadata. |
-| Sequence number (`seq`) | A monotonically increasing u64 assigned by the writer to order records for a given engine instance/epoch. |
-| Writer epoch | A monotonically increasing u64 fencing token stamped by the current writer. Used to detect and discard stale writes left behind by a superseded writer (e.g. after leader failover). |
-| Segment | One rotated (sealed), immutable WAL file. |
+| Frame | The physical unit inside a segment: an 8-byte length/CRC32C header followed by a variable-length payload. |
+| Payload | The bytes carried by a record or footer frame. |
+| Record | One decoded logical WAL entry: an operation or transaction marker. |
+| Sequence number (`seq`) | A u64 ordering WAL records across the linked segment history. The ledger reserves sequence space and segment links enforce increasing history. |
+| Writer epoch | The fencing epoch stored in each segment header. It is not repeated in record payloads. |
+| Segment | A ledger-named WAL file. The final ledger member is open; preceding members are sealed. |
+| Chain link | A segment id, last sequence, and xxh3-128 digest that bind the next segment to its predecessor. |
+| Ledger | The `LEDGER` snapshot and edit journal that authoritatively names, orders, and retires local WAL segments. |
 
 ## 3. Frame format (physical framing layer)
 
-Every record is written to the WAL file as a length-prefixed, checksummed frame:
+Every record or segment footer is written as a length-prefixed, checksummed frame
+inside a segment:
 
 ```
 +-------------------+--------------+-----------------------------+
@@ -213,18 +227,16 @@ Constants:
 ### 3.1 No magic number or version at the frame level
 
 The 8-byte frame header carries no magic bytes and no version tag of its own —
-versioning lives one layer up, in the payload encoding (§4). A frame is *structurally*
+versioning lives one layer up, in the payload encoding (§4). A frame is structurally
 valid whenever `payload_len <= 64 MiB` and the trailing bytes checksum correctly; the
-frame layer alone cannot distinguish "valid frame of an unknown future format" from
-"corrupt frame," which is why the payload-level magic/version (§4.1) is the primary
-forward-compatibility mechanism, and why recovery logic that needs to search for a
-resynchronization point (§5.3) scans for the payload magic, not a frame magic.
+frame layer alone cannot distinguish a valid frame of an unknown future format from
+corrupt bytes. Recovery that searches an ambiguous suffix must identify a complete,
+checksummed frame whose payload decodes as a record or footer (§6.2).
 
 **TODO: verify** whether a future revision should add a frame-level magic/version to
-allow multiplexing incompatible payload encodings within one physical frame stream, or
-whether the payload-level magic is sufficient permanently. The no-frame-magic design
-is deliberate, but it has never been exercised against a forward-incompatible payload
-version bump.
+allow multiplexing incompatible payload encodings within one physical frame stream,
+or whether the payload-level magic is sufficient permanently. FORMAT 8 uses the
+payload version for this gate.
 
 ### 3.2 Zero-length payloads
 
@@ -250,7 +262,7 @@ structure (§5.4) is carried *inside* this envelope as a TLV value — is encode
 | Field | Size | Value |
 |---|---|---|
 | `magic` | 2 bytes | ASCII `"MW"` (`0x4D 0x57`) |
-| `version` | 1 byte | `1` (current) |
+| `version` | 1 byte | `2` (current) |
 
 Total fixed prefix: **3 bytes**.
 
@@ -273,13 +285,11 @@ TLV header is 5 bytes (`1 + 4`), followed by `len` bytes of value.
   reader encountering a payload written by a newer writer that adds a new optional TLV
   tag can still decode all tags it understands and ignore the rest, provided the
   `magic`/`version` prefix is otherwise identical.
-- **Duplicate tags are accepted; the last occurrence wins.** (This is a defined
-  behavior in at least one implementation's doc comment; **TODO: verify** it is relied
-  upon anywhere, versus simply being a permissive default that no writer exercises.)
+- **Duplicate tags are accepted; the last occurrence wins.**
 - A decoder must reject the whole payload as corrupt if:
   - it is shorter than the 3-byte prefix,
   - `magic` doesn't match `"MW"`,
-  - `version` doesn't match a value the decoder supports (only `1` is currently
+  - `version` doesn't match a value the decoder supports (only `2` is currently
     defined — there is no defined negotiation/migration behavior for a future
     version bump beyond "reject"),
   - a TLV header is truncated (fewer than 5 bytes remain when one is expected),
@@ -298,19 +308,19 @@ TLV header is 5 bytes (`1 + 4`), followed by `len` bytes of value.
 | 6 | `EXPIRATION` | no | 8 bytes, u64 LE | Optional TTL/expiration timestamp, Unix epoch milliseconds. |
 | 7 | `RANGE_END` | no | variable | Exclusive end key for a range-delete operation. |
 | 8 | `TXN_ID` | no | 8 bytes, u64 LE | Transaction identifier, present when the record is part of a transaction. |
-| 9 | `COMPRESSION` | no | 1 byte | Compression algorithm applied to a value-write record's `VALUE`, if any. Permitted only on `Put`/`Insert`; see §5.4 for its exclusion from `TxnBatch`. Algorithm ID meanings are defined once, shared with other formats (e.g. SST blocks), in [`value-encoding.md`](value-encoding.md). |
-| 10 | `WRITER_EPOCH` | yes | 8 bytes, u64 LE | Fencing epoch of the writer that produced this record. Required on every record (not just transactional ones). |
+| 9 | `COMPRESSION` | no | 1 byte | Compression algorithm applied to `VALUE` on `Put`, `Insert`, or `TxnBatch`. On `TxnBatch`, it covers the complete nested-batch payload before decoding; nested operation values remain raw. Algorithm ID meanings are defined once, shared with other formats (e.g. SST blocks), in [`value-encoding.md`](value-encoding.md). |
 
 All multi-byte integers in TLV values are **little-endian**.
 
-`OP`, `CF_ID`, `SEQ`, `KEY`, and `WRITER_EPOCH` are required unconditionally on every
-record; everything else is optional, and its presence or absence carries meaning per
-§5.
+`OP`, `CF_ID`, `SEQ`, and `KEY` are required unconditionally on every record;
+everything else is optional, and its presence or absence carries meaning per §5.
+The segment header supplies the writer epoch for every record in that segment.
 
 ### 4.3 Encoding notes (non-normative but relevant to compatibility)
 
 - A writer that has a value but wants to compress it may replace the raw value bytes
-  with a compressed form under tag 5 and record the algorithm under tag 9. A reader
+  with a compressed form under tag 5 and record the algorithm under tag 9. This
+  applies to the complete nested payload in a `TxnBatch` record as well. A reader
   that doesn't understand a given compression byte cannot safely decode the value —
   this makes the compression scheme part of the effective compatibility surface even
   though it's logically a value-codec concern layered on top of the WAL TLV format.
@@ -335,10 +345,11 @@ record; everything else is optional, and its presence or absence carries meaning
 | 3 | `DeleteRange` | range delete | Tombstone the half-open range `[KEY, RANGE_END)` at `SEQ`. `RANGE_END` required. |
 | 4 | `TxnBegin` | transaction-begin marker | Marks the start of a (legacy-style, non-atomic-frame) transaction identified by `TXN_ID`. Carries no direct mutation. |
 | 5 | `TxnCommit` | transaction-commit marker | Marks the transaction identified by `TXN_ID` as committed; on replay this is the trigger to apply all operations buffered since the matching `TxnBegin`. Carries no direct mutation of its own. |
-| 6 | `TxnBatch` | atomic transaction batch | A single physical frame whose `VALUE` holds an entire transaction's operations, nested-encoded (§5.4). Carries no direct mutation itself — replay decodes and applies the nested batch. |
+| 6 | `TxnBatch` | atomic transaction batch | A single physical frame whose `VALUE` holds an entire transaction's operations, nested-encoded (§5.4). The outer `VALUE` may be compressed using tag 9. Carries no direct mutation itself — replay decodes and applies the nested batch. |
 
-Every operation kind (including markers) carries `SEQ`, `CF_ID` (markers conventionally
-use a zero/default CF), and `WRITER_EPOCH` per the required-field rule in §4.2.
+Every operation kind (including markers) carries `SEQ` and `CF_ID` (markers
+conventionally use the default CF). Its writer epoch is inherited from the segment
+header, as specified in §1.1.2.
 
 `is_transaction_marker` = `{TxnBegin, TxnCommit, TxnBatch}`. These three carry no
 direct memtable mutation on their own record; their effect is defined entirely by
@@ -346,10 +357,10 @@ direct memtable mutation on their own record; their effect is defined entirely b
 
 ### 5.2 Sequence numbers and ordering
 
-- `SEQ` is a per-engine-instance u64 that must be monotonically non-decreasing across
-  the logical WAL order defined in §1.1 (sealed segments ascending, then active file,
-  each front-to-back). Recovery uses the maximum observed `SEQ` to restore the
-  engine's sequence counter.
+- `SEQ` is a per-database u64 that must strictly increase across the ledger's logical
+  history. Each segment starts above its predecessor's last sequence. Recovery uses
+  observed records and the ledger/catalog sequence reservation when assigning later
+  values.
 - Sequence numbers are not required to be contiguous at the frame level in general,
   **except** within a transaction batch, where they must be exactly contiguous (see
   §5.4).
@@ -377,9 +388,8 @@ the wire format, and a recovering reader must support both:
   record, using the nested format in §5.4.
 - Because it is one physical frame, it is atomic with respect to torn-tail truncation
   by construction: either the whole frame's CRC verifies (in which case the whole
-  transaction is valid and is applied entirely) or it doesn't (in which case, per §6,
-  it is either the very last frame in the active file — treated as an incomplete tail
-  and dropped — or it is mid-stream corruption, a hard error).
+  transaction is valid and is applied entirely) or it does not (in which case, per
+  §6, it is in the open segment's tail or is corruption).
 - This is the preferred encoding for ordinary-sized transactions. Split-marker
   framing is **not** merely a read-path compatibility concern: it remains an
   actively emitted writer path for transactions too large to buffer as a single
@@ -393,7 +403,9 @@ Nested transaction markers (a batch containing another `TxnBegin`/`TxnCommit`/
 ### 5.4 Nested transaction batch payload (inside a `TxnBatch` record's `VALUE`)
 
 The `VALUE` field of a `TxnBatch` record (tag 5, itself a TLV value inside the outer
-§4.1 envelope) holds its own self-describing structure:
+§4.1 envelope) holds its own self-describing structure. If the outer record carries
+`COMPRESSION` (tag 9), the reader decompresses the outer `VALUE` before decoding this
+structure. The nested operation values below are always stored raw.
 
 ```
 +--------+---------+---------+-----------+-----------+----------+------------------+
@@ -452,137 +464,76 @@ inner-payload self-consistency above):
 - outer `TXN_ID` == inner `txn_id`
 - outer `SEQ` == inner `commit_seq`
 
-The nested batch payload is never compressed: `COMPRESSION` (tag 9) applies only to a
-value-write record's `VALUE` (§4.2), so a `TxnBatch` record carrying that tag is
-corrupt. Nested operation values inside the batch have no compression field of their
-own and are likewise always stored raw. **TODO: verify** whether both reference
-implementations enforce this on decode, or merely never emit it.
+Nested operation values inside the batch have no compression field of their own and
+are always stored raw. `COMPRESSION` applies only to the outer `VALUE` bytes, not to
+individual nested values.
 
-## 6. Recovery semantics: valid vs. torn/corrupt tail
+## 6. Recovery semantics: ledger order, valid prefixes, and fencing
 
-Recovery/replay walks frames sequentially from byte 0 of a file (see §1.1 for
-cross-file order) and must classify any failure to parse the *next* frame into one of
-two buckets, because they are handled completely differently:
+A reader reconstructs WAL history from the ledger and the cloud catalog, never by
+sorting a directory or object listing. It validates every segment against the
+recorded header, chain, and sealing facts before applying its records.
 
-### 6.1 "Incomplete tail" (tolerable, only at the very end of the *active* file)
+### 6.1 Segment order and chain validation
 
-Conditions that indicate a writer was interrupted mid-append (crash, power loss)
-partway through writing the *last* frame, rather than mid-stream corruption:
+For local history, replay the ledger's members oldest first. For cloud history, replay
+the catalog's segments oldest first, beginning at its anchor. Validate that every
+segment id matches its file/key and header, each header names the previous chain link,
+sequence ranges increase, and writer epochs do not regress. Sealed segments must have
+a valid footer that agrees with all preceding frames and the recorded sealed facts.
+Only the final ledger member is open and may lack a footer.
 
-- Fewer than 8 bytes remain for a frame header at the current position.
-- The frame header bytes read as all-zero **and** every remaining byte in the file
-  from that position onward is also zero (a "zero-filled tail" — consistent with a
-  pre-allocated/zero-initialized file region that a partial write never reached).
-- The frame header's declared `payload_len` would require more bytes than remain in
-  the file (a torn payload) — **provided** that scanning the remaining bytes for
-  another independently-verifiable frame (payload magic matches, and its CRC
-  verifies, and it decodes) does **not** find one. (See §6.3 — this guards against
-  silently accepting a *corrupted length field* that happens to swallow real,
-  verifiable data after it.)
+A frame must have a complete 8-byte header, a payload no larger than 64 MiB, and a
+matching CRC32C. Record payloads must decode under the supported MW version and
+operation rules. A footer is recognized by its MF magic and footer version; it is
+valid only at the end of a sealed segment.
 
-**Handling:** When one of these conditions is hit while replaying the file identified
-as the *final active* file in the replay order (§1.1) — i.e. `wal.log`, not a sealed
-segment — the reader stops replay at the last verified frame boundary and treats
-everything from there to EOF as if it were never written. This is not reported as an
-error to the caller (though implementations may log it): a truncated tail on the
-active file is an expected consequence of a crash between "frame partially written"
-and "next fsync," and is exactly what WAL replay exists to tolerate.
+### 6.2 Torn tails and corruption
 
-If the same condition occurs in a **sealed segment file** rather than the final active
-file, it is **not** tolerated — sealed segments are supposed to be immutable and
-complete once rotated, so an incomplete tail there indicates real corruption (or a
-segment file mistakenly still open for writes) and must be surfaced as an error
-(subject to §6.2's salvage policy, if enabled).
+A partial or damaged final frame may be tolerated only in the ledger's open segment,
+and only when the persisted fsync boundary proves that the verified prefix contains
+all bytes acknowledged as durable. A sealed segment must verify in full; it cannot
+have a tolerated torn tail. A segment shorter than its recorded durable boundary is
+corruption.
 
-### 6.2 True corruption (never silently tolerated)
+Strict recovery fails on corruption. An explicit salvage mode may retain the verified
+prefix of the open segment, record the corruption, cut the segment at that prefix,
+and continue from a new segment. Salvage must preserve the greatest sequence that
+could have been present in discarded verified data so those values cannot be assigned
+again. Corruption inside a sealed segment or in the ledger is not an ordinary torn
+tail.
 
-Anything that isn't classifiable as an "incomplete tail" per §6.1 — a CRC mismatch, an
-invalid payload magic/version, a malformed TLV, an operation code out of range, a
-`payload_len` that overflows an offset computation, mismatched transaction batch
-metadata, etc. — is corruption. Two supported reader policies for what happens next:
+If a failed frame hides later independently verifiable frames, recovery must not treat
+those later records as part of the verified prefix. Salvage may discard them only
+while retaining their highest observed sequence as a no-reuse floor. A reader must
+never silently reinterpret a damaged length as a valid boundary that loses later
+acknowledged data.
 
-- **Strict**: propagate the error; recovery fails outright. This is the default/safe
-  policy.
-- **Salvage-valid-prefix**: stop replay at the point corruption was detected, keep
-  everything successfully verified before it, and continue operating as if the log
-  ended there (recording that corruption was observed, for observability/alerting).
-  This is an explicit opt-in policy for tolerating partial data loss in exchange for
-  availability; it must not be the default, and a caller choosing it is accepting a
-  potential silent gap in durability from the corruption point onward.
+### 6.3 Sequence reservation and salvage floor
 
-Under either policy, a reader must run the §6.3 verified-suffix check before
-discarding a tail, to separate "corrupt length field hiding recoverable data after it"
-from "corrupt length field with nothing salvageable after it." The former is always a
-hard error, including in the final-active-file tail case that §6.1 would otherwise
-tolerate: silently dropping independently verifiable data must never be the outcome of
-a tolerance rule intended for genuine partial writes.
+The ledger's `seq_reserved_through` records sequence numbers already handed out or
+reserved. A `Reserve` edit must raise this value; it must not move backward.
+Sequence gaps are permitted. A later writer starts above the maximum of the durable
+ledger reservation, recovered records, and any salvage floor.
 
-### 6.3 Verified-suffix detection (guards against a corrupted length field)
+The cloud catalog's `seq_floor` carries sequence numbers that may have belonged to
+WAL discarded during salvage. It is monotonic and prevents those sequence numbers
+from being assigned again after local recovery or cache replacement.
 
-Because §6.1's "incomplete tail" tolerance exists specifically to accept *legitimate*
-partial writes, a reader must guard against a corrupted `payload_len` field being
-misclassified as a benign incomplete tail when in fact real, later, independently
-verifiable data exists past where the (corrupt) declared length would place the next
-frame boundary. The check: scan the undecodable remainder of the buffer for any byte
-offset at which the payload-level magic+version prefix (`"MW"` + version byte, §4.1)
-appears, such that a frame header immediately preceding it decodes with a matching
-`payload_len`/CRC and the payload itself parses successfully. If such a frame is
-found, the original truncation is **not** benign — it must be reported as a hard
-error ("frame length overruns EOF and hides a verified later frame") rather than
-silently truncating the log before recoverable data.
+### 6.4 Writer-epoch fencing
 
-This check is O(n) over the ambiguous tail region only (bounded by the 64 MiB max
-frame size, §3), not the whole file.
+The writer epoch is present in each segment header, not in individual record payloads.
+Every record in one segment therefore has the same epoch. A segment after another
+segment may retain the same epoch or move to a higher one; it must never lower the
+epoch. Local ledger facts and cloud catalog entries must agree with the segment's
+header epoch.
 
-### 6.4 Writer-epoch fencing during replay
-
-Because a single WAL directory can (in failover scenarios) contain records from more
-than one writer generation:
-
-1. Recovery performs an initial pass to discover, per file in replay order, the
-   lowest sequence number and lowest replay-ordinal position at which each observed
-   `writer_epoch` first appears. `writer_epoch == 0` is treated as unfenced and does
-   not participate in this mechanism: it is a reserved sentinel meaning "fencing
-   disabled," not an unset-field default, and it is excluded both from frontier
-   recording and from staleness testing.
-2. A record from writer epoch *E* is considered **stale** (skipped, not applied,
-   still counted separately in recovery stats) if there exists some other epoch
-   *E' > E* whose first-seen sequence number is `<=` this record's sequence number,
-   or whose first-seen replay-ordinal is earlier than this record's ordinal. In
-   effect: once a higher epoch's writes are known to have started, any lower-epoch
-   record whose effect could conflict with or be superseded by them is dropped. The
-   "ordinal" is a single counter spanning the whole logical replay stream (all
-   sealed segments in ascending order, then the active file), never reset between
-   files.
-3. **Epoch-mixing within a single physical local WAL file (active or sealed) is
-   normal, not corruption, and must not be rejected.** This format's active file is
-   reopened in append mode across a writer failover, not rotated at the epoch
-   boundary — there is no mechanism in this document (see §1.1) that seals `wal.log`
-   at the moment a new writer acquires a higher epoch. It is therefore the expected
-   result of an ordinary crash-then-failover cycle for one `wal.log` — and, since
-   rotation moves the file's bytes verbatim into a sealed segment, potentially a
-   sealed segment too — to contain records spanning more than one `writer_epoch`,
-   distinguished only by the per-record `writer_epoch` field, never by file
-   boundaries. Point 2's staleness rule is the *sole* mechanism this document
-   defines for resolving such a file during local recovery. A conforming reader
-   MUST NOT implement a separate "reject on epoch-mixing" check for local recovery:
-   doing so would fail on data this format's own append-on-reopen recovery model
-   produces routinely, rejecting perfectly ordinary post-failover WAL state as
-   corrupt. (This is narrower than, and does not contradict, the cloud-upload
-   requirement in §1.2 that an *uploaded* object's byte range be single-epoch —
-   that's a constraint on what a writer chooses to upload, not on what a local file
-   may contain.)
-
-   Single-epoch validation belongs only to the cloud-upload path (§1.2), never to
-   local recovery.
-4. `max_epoch_seen` (the highest writer epoch observed anywhere during recovery) is
-   surfaced to the caller so the engine can resume issuing new writes starting at an
-   epoch higher than anything seen.
-
-This fencing behavior is squarely a **format/replay-contract** matter (it changes
-which records a compliant reader must apply), not merely internal engine policy — an
-engine that ignores it would apply stale writes after a failover and violate the
-durability/consistency contract implied by `WRITER_EPOCH` being a required field.
+A writer acquiring a lease must choose an epoch above every epoch that could already
+be durable in the database's WAL, as required by `lease.md` §4. A stale writer must
+fail its lease-fenced mutations. Recovery does not filter individual records by epoch:
+the lease and monotonic segment-chain rules prevent a superseded writer from
+publishing authoritative later history. The catalog's `fencing_epoch` must match
+the epoch authorized to mutate it.
 
 ## 7. Format vs. policy — what's in scope here
 
@@ -624,14 +575,8 @@ Open questions:
   permanent decision or open for revision. No forward-incompatible payload-version
   bump has ever been exercised against it.
 
-Cross-document dependency, stated here because it is invisible from within this
-document: the fencing guarantee of §6.4 holds only if every record a given
-`writer_epoch` produces genuinely postdates every record already durable under a
-lower epoch. Nothing in the WAL format enforces that. It is established at lease
-acquisition (`lease.md` §4 step 4), which must floor a newly granted epoch at the
-`max_epoch_seen` recovered from this engine's own WAL and manifest rather than
-merely incrementing whatever the lease file recorded. `writer_epoch` is seeded from
-that granted epoch once at startup and never reassigned, so a violation at
-acquisition time is detected nowhere downstream. In cloud deployments the same value
-also seeds the catalog's `fencing_epoch` (§1.2, §1.2.1): lease `epoch`, local
-`writer_epoch`, and cloud `fencing_epoch` are one number by construction.
+Cross-document dependency: lease acquisition (`lease.md` §4) must choose an epoch
+above every writer epoch that could already be durable in this database. The granted
+lease epoch is stored in each new segment header and is also the cloud catalog's
+`fencing_epoch` (§1.2, §1.2.1). A segment contains records from exactly one writer
+epoch; epochs may rise along the segment chain but may not regress.

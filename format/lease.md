@@ -199,7 +199,7 @@ current leader record followed by a durable write of a new one:
 5. Write the new record — `{epoch: new_epoch, holder_id: this_process, acquired_at:
    now}` — by writing to a temporary file, fsyncing it, atomically renaming it over
    the leader record path, then fsyncing the containing directory. This is the same
-   staged-write pattern the manifest uses for its snapshot and mirror files
+   staged-write pattern the manifest uses for its snapshot file
    (`manifest.md` §6.3).
 6. Re-read the leader record and confirm it shows this process's `holder_id` at the
    expected new epoch. If it does not, the acquisition lost a race and fails. The
@@ -419,15 +419,17 @@ correctly implement §3–§7:
 - Release forces `acquired_at` to the exact sentinel `1970-01-01T00:00:00Z` rather
   than deleting the record or writing a dedicated "released" marker; see §5.3.
 - An OS-level advisory lock is not required alongside the leader record; see §1.
-- This document's `epoch` (§2) and the WAL's `writer_epoch` (`wal.md` §2, TLV
-  tag 10, §6.4) are the same value by construction. A successful acquisition's
-  `epoch` is copied once into `writer_epoch`, before WAL replay runs, and is never
-  reassigned. It is a one-time seed, not an ongoing enforced identity and not an
-  independent counter; see `wal.md` §7 for the consequences for §4 step 4 above.
+- A successful acquisition's `epoch` is written into the header of each WAL segment
+  opened under that lease (`wal.md` §1.1.2, §6.4). The segment-chain rule requires
+  those epochs not to decrease, and cloud catalog mutations require the current lease
+  epoch to match `fencing_epoch` (`wal.md` §1.2). It is not a per-record field.
 
 **Open questions:**
 
+- **TODO: verify** — Which non-conforming or external writer scenario the
+  post-acquisition reread in §4 step 6 is intended to catch.
+- **TODO: verify** — Whether a current holder must distrust its lease if its
+  matching epoch and `holder_id` remain present but an external change makes
+  `acquired_at` appear stale to competing readers (§6).
 - **TODO: verify** — Whether the absence of a checksum over the leader record (§7)
   is an accepted gap or an omission to close in a future revision.
-- **TODO: verify** — Whether a duplicate field should remain last-occurrence-wins or
-  become indeterminate; see the design note in §7.

@@ -2,38 +2,319 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/cntryl/lsm-spec/schema/wal-catalog.schema.json",
   "title": "WalPublicationCatalog",
-  "description": "Cloud WAL publication catalog. See format/wal.md §1.2.1. This is the actual on-disk JSON shape, not a decoded logical projection.",
-  "type": "object",
-  "required": ["format_version", "fencing_epoch", "segments"],
-  "additionalProperties": false,
-  "properties": {
-    "format_version": { "const": 1 },
-    "fencing_epoch": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
-    "segments": {
+  "description": "FORMAT 8 cloud WAL publication catalog JSON, format version 3. See format/wal.md §1.2.1.",
+  "$defs": {
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "chainLink": {
       "type": "object",
-      "description": "Keyed by segment_id as a decimal string.",
-      "propertyNames": {
-        "pattern": "^(0|[1-9][0-9]*)$",
-        "description": "Canonical, unpadded decimal u64 segment ID."
-      },
-      "additionalProperties": {
-        "type": "object",
-        "required": ["segment_id", "writer_epoch", "max_sequence", "size_bytes", "content_crc32c", "object_key"],
-        "additionalProperties": false,
-        "properties": {
-          "segment_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-          "writer_epoch": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-          "max_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-          "size_bytes": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-          "content_crc32c": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-          "object_key": {
-            "type": "string",
-            "pattern": "^[^/]+(/[^/]+)*/epochs/[0-9]{20}/[0-9]{20}\\.wal$",
-            "description": "Must equal the canonical key derived from this entry's own writer_epoch/segment_id, under the deployment's configured root prefix (default 'wal'). See format/wal.md \u00a71.2.1.",
-            "$comment": "The root prefix is deployment-configurable, so this pattern checks only the fixed epochs/{epoch}/{segment}.wal suffix. Equality against the derived canonical key cannot be expressed in JSON Schema and must be checked by the validator."
+      "required": [
+        "id",
+        "last_seq",
+        "digest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "last_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "digest": {
+          "type": "array",
+          "minItems": 16,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
           }
         }
       }
+    },
+    "maxSequencePerFamily": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "sealedFacts": {
+      "type": "object",
+      "required": [
+        "link",
+        "record_count",
+        "data_len",
+        "max_seq_per_cf"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "link": {
+          "type": "object",
+          "required": [
+            "id",
+            "last_seq",
+            "digest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "digest": {
+              "type": "array",
+              "minItems": 16,
+              "maxItems": 16,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "data_len": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "max_seq_per_cf": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      }
+    },
+    "catalogEntry": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "prev",
+        "facts",
+        "size_bytes",
+        "crc32c"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "prev": {
+          "type": "object",
+          "required": [
+            "id",
+            "last_seq",
+            "digest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "digest": {
+              "type": "array",
+              "minItems": 16,
+              "maxItems": 16,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        },
+        "facts": {
+          "type": "object",
+          "required": [
+            "link",
+            "record_count",
+            "data_len",
+            "max_seq_per_cf"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "link": {
+              "type": "object",
+              "required": [
+                "id",
+                "last_seq",
+                "digest"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "last_seq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "digest": {
+                  "type": "array",
+                  "minItems": 16,
+                  "maxItems": 16,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              }
+            },
+            "record_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "data_len": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "max_seq_per_cf": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          }
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "crc32c": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
     }
-  }
+  },
+  "type": "object",
+  "required": [
+    "format_version",
+    "fencing_epoch",
+    "anchor",
+    "next_segment_id",
+    "seq_floor",
+    "retired_by",
+    "segments"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {
+      "const": 3
+    },
+    "fencing_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "anchor": {
+      "$ref": "#/$defs/chainLink"
+    },
+    "next_segment_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "seq_floor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "retired_by": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/catalogEntry"
+      }
+    }
+  },
+  "$comment": "JSON Schema cannot enforce chain order, epoch monotonicity, anchor/retired_by correspondence, sequence maxima, or that next_segment_id exceeds the chain head. The reader must enforce these invariants."
 }

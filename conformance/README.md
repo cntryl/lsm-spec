@@ -18,13 +18,23 @@ An implementation conforms to a given spec version when:
   fields are exempted as semantic-only), and its reader must correctly decode
   fixtures produced elsewhere.
 - **Schema validation.** Where a `schema/*.json` definition exists for a structure,
-  fixtures must validate against it.
+  fixtures must validate against it. A fixture index's `references` lists schemas
+  required to resolve external `$ref` values (for example, the manifest edit schema
+  reuses manifest definitions).
 
 ## Status
 
-No fixtures are published yet, so conformance cannot currently be verified against
-this repository. The requirements above define what a fixture set must eventually
-establish; adding one is tracked as outstanding work.
+`fixtures/format8-manifest/populated-local/` is a populated FORMAT 8 compatibility
+fixture from Midge v0.4.1. It covers the marker, manifest snapshot, legacy manifest
+base, empty journal, intent log, and one SST. Schema-validation examples cover the
+manifest, manifest journal payload, decoded WAL record, cloud catalog, and decoded
+local ledger payload. These are useful contract checks, not a complete byte-level
+conformance suite: there is not yet a full WAL segment/ledger byte fixture, cloud
+publication fixture, or writer round-trip harness.
+
+Malformed reader inputs are kept under `invalid/` and are not conformance writer
+output. Invariants JSON Schema cannot express are explicitly left to an executable
+conformance harness.
 
 ## Notes for fixture authors
 
@@ -39,12 +49,12 @@ establish; adding one is tracked as outstanding work.
   `18446744073709551616` instead, so a fixture one below `u64::MAX` may validate when
   it should not, and vice versa. Boundary cases at the top of the u64 range must be
   checked by the harness, not left to schema validation.
-- **Cross-field equality is out of schema scope.** Several rules cannot be expressed
-  in JSON Schema and must be checked by the harness: that a WAL catalog entry's map
-  key equals its own `segment_id`, that its `object_key` equals the canonical key
-  derived from its own `segment_id`/`writer_epoch` under the configured root
-  (`format/wal.md` §1.2.1), and that every entry's `writer_epoch` is at most the
-  catalog's `fencing_epoch`.
+- **Cross-field and chain invariants are out of schema scope.** The harness must
+  validate manifest frontier/family agreement, WAL ledger reachability and segment
+  chain order, catalog anchor/segment continuity, monotonic epochs, retirement
+  authority, and that `next_segment_id` exceeds every allocated id. A catalog
+  segment object's key is derived from its epoch and segment id; no `object_key` is
+  serialized in the catalog (`format/wal.md` §1.2.1).
 - **Binary formats have no schema.** The WAL frame and payload layouts, the SST
   block/entry/footer layouts, and the manifest journal's record framing are
   normative as byte layouts. The `schema/*.json` files covering them describe a

@@ -1,0 +1,15 @@
+{
+  "flushed_through": [
+    {
+      "cf_id": 0,
+      "through_sequence": 0
+    }
+  ],
+  "files": [
+    {
+      "name": "../outside.sst",
+      "level": 0,
+      "size_bytes": 0
+    }
+  ]
+}

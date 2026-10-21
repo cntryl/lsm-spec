@@ -1,0 +1,8 @@
+{
+  "op": "TxnBatch",
+  "cf_id": 0,
+  "seq": 12,
+  "key": "dHhu",
+  "txn_id": 42,
+  "compression": 1
+}

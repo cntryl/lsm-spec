@@ -1,8 +1,19 @@
 # Changelog
 
-## [Unreleased] — 0.1.0-dev
+## [Unreleased] — 1.0.0-dev
+
+### Breaking
+- Replace the earlier draft FORMAT 3 manifest/WAL assumptions with the FORMAT 8
+  profile: manifest journal envelopes and flush frontiers, local WAL ledger and
+  linked segments, SST V4, and cloud WAL catalog v3.
+- Define `TxnBatch` outer-value compression as valid, and define `manifest.json` as a
+  read-only legacy base fallback rather than a FORMAT 8 writer mirror.
 
 ### Added
+- `schema/wal-ledger.schema.json` and FORMAT 8 manifest, journal, WAL record, and
+  cloud catalog schema-validation fixtures.
+- WAL publication catalog recovery rules in `behavior/cloud-storage.md`.
+
 - `behavior/cloud-storage.md` — identity-pinned cloud ranges, GCS XML request
   framing, and recovery of proven unpublished compaction outputs.
 - `format/wal.md` — WAL framing, payload encoding, transaction semantics,
@@ -27,24 +38,16 @@
 - Document status headers now state RFC 2119 usage (`must`/`must not`/`required`/
   `should`/`may`) once, instead of repeating implementation-provenance language in
   every file.
-- `conformance/README.md` now states plainly that no fixtures are published yet,
-  and adds notes for fixture authors on schema limitations (see **Schema**, below).
+- `conformance/README.md` now records the available FORMAT 8 compatibility and schema
+  examples, the remaining binary-fixture gaps, and schema limitations.
 
 ### Fixed
 - `format/wal.md` §5.4 — corrected the nested-transaction-batch minimum-record-length
   itemization, which omitted the mandatory `value`/`range_end` presence flags and so
   summed to 18 instead of the stated 20 bytes.
-- `format/wal.md` §1.1 — reworded the active-file naming description so "always named
-  `wal.log`" no longer directly contradicts the following paragraph's description of
-  the legacy `wal_{segment:06}.log` naming pattern.
-- `format/wal.md` §1.2.1 — specified that the publication catalog's `segments` map
-  keys are canonical unpadded decimal (not the zero-padded form used elsewhere in the
-  same section), and added the missing validity constraint that a map key must equal
-  its entry's own `segment_id` field.
-- `format/wal.md` §1.2, §1.2.1 — generalized the cloud object-key layout from a
-  hardcoded `wal/` prefix to a deployment-configurable `{root}` (default `wal`), and
-  noted that a validator must compare `object_key` against the root the catalog was
-  actually loaded under.
+- `format/wal.md` §1.1–§1.2.1 — specifies the FORMAT 8 local segment ledger and
+  epoch-scoped cloud segment keys, plus a v3 catalog whose object keys are derived
+  rather than serialized.
 - `format/sst.md` §7.1 — rewrote the footer-decode step as an explicit, ordered
   decision tree; previously "a magic mismatch...is `Corruption`" and the legacy
   V1–V3 `CompatibilityError` exception both claimed the same failure case with no
@@ -55,10 +58,9 @@
 - `format/sst.md` — realigned four ASCII-art block/frame diagrams whose column
   borders did not match their content-row widths (`wal.md` §3, §4.1, §5.4;
   `manifest.md` §4.1).
-- `format/manifest.md` §2 — corrected the claim that the directory-level `FORMAT`
-  integer, the SST footer's `format_version`, and the WAL payload's `version` byte
-  are versioned together, since their current values (3, 4, 1 respectively) don't
-  correspond and no arithmetic relationship between them is defined anywhere.
+- `format/manifest.md` §2 — defines the FORMAT 8 marker independently from embedded
+  structure versions: SST footer 4, WAL payload 2, ledger/header 2, footer 1, and
+  cloud WAL catalog 3.
 - `format/manifest.md` §5.6, `schema/manifest.schema.json` — clarified that
   `next_sst_seqs` map keys are `cf_id` rendered as a canonical unpadded decimal
   string (JSON object keys are always strings; the field description previously
@@ -105,16 +107,11 @@
   decode-only compatibility target; a conforming writer appends only
   `DropColumnFamilyAt`. Unlike the WAL's legacy split-marker transaction encoding
   (below), this path is not an actively written fallback.
-- `format/wal.md` §6.4/§7 — `writer_epoch == 0` is a reserved sentinel meaning
-  "fencing disabled," carried forward as a normative reserved value rather than an
-  unset-field default.
 - `format/wal.md` §5.3 — the legacy split-marker transaction encoding
   (`TxnBegin` … `TxnCommit`) is not a read-only compatibility path: it remains an
   actively written fallback for transactions too large to encode as a single atomic
   `TxnBatch` frame (the "spill" case). A writer targeting full interoperability must
   be able to *emit* split-marker transactions, not merely decode them.
-- `format/wal.md` §1.1 — the legacy `wal_{segment:06}.log` active-file naming
-  pattern is recognized on decode only; no conforming writer produces it.
 - `format/sst.md` §3.3/§9 — this format defines no restart points and no
   reader-visible restart-offset table. A writer's internal restart interval, if it
   keeps one, has zero effect on wire bytes; the `RESTART_INTERVAL` terminology entry
@@ -127,11 +124,9 @@
 - `format/lease.md` §7 — a duplicate field in the leader record is not corruption;
   the last occurrence in the file wins. (Recorded as a considered trade-off in §7,
   with a design note on the alternative of failing closed instead.)
-- `format/lease.md` §8, `format/wal.md` §7 — the lease's `epoch` and the WAL's
-  `writer_epoch` are the same value by construction: a successful acquisition's
-  `epoch` is copied once into `writer_epoch` at startup, before WAL replay runs, and
-  is never reassigned. In cloud deployments the same value also seeds the WAL
-  catalog's `fencing_epoch` (`wal.md` §1.2, §1.2.1).
+- `format/lease.md` §8, `format/wal.md` §1.1.2/§6.4 — the current lease epoch is
+  recorded in each new segment header; cloud catalog mutations require it to match
+  `fencing_epoch`.
 - `format/value-encoding.md` §2 — the 256-byte minimum-compression-input-size
   convention is documented as a shared, non-normative writer heuristic common to the
   WAL value path and the SST block path; a reader must accept a compressed or
@@ -157,9 +152,8 @@
 - `format/wal.md` §5.1 — `Delete` records **MUST NOT** carry `VALUE` (or, therefore,
   `COMPRESSION`); a `Delete` record carrying either is corrupt. `sst.md` §3.4's
   reservation of a value-bearing SST `Delete` entry depends on this rule.
-- `format/wal.md` §5.4 — the nested `TxnBatch` payload is never compressed:
-  `COMPRESSION` applies only to a value-write record's `VALUE`, so a `TxnBatch`
-  record carrying that tag is corrupt.
+- `format/wal.md` §5.4 — the outer `TxnBatch` `VALUE` may be compressed before nested
+  decoding; nested operation values remain raw.
 
 ### Reserved (decided, not left open)
 - `format/sst.md` §3.2/§9 — `Merge` (`entry_type = 3`) is reserved as of this spec
@@ -174,18 +168,11 @@
   grouping to match `sst.md` §7 exactly; rejects `Merge` entries and value-bearing
   `Delete` entries as reserved states that must not appear in conforming-writer
   fixtures, even though a reader must still decode them.
-- `schema/manifest.schema.json` — `smallest_key`/`largest_key` now accept either a
-  base64 string or a byte-value array, pending resolution of the open question in
-  `manifest.md` §5.5 on which encoding a writer actually produces; `next_sst_seqs`
-  keys are now constrained to the canonical unpadded-decimal pattern used
-  elsewhere in this format.
-- `schema/wal-catalog.schema.json` — `object_key`'s pattern now allows the
-  deployment-configurable root prefix (`wal.md` §1.2) instead of hardcoding `wal/`.
+- `schema/manifest.schema.json` — key bounds use lowercase hex strings or null, and
+  `next_sst_seqs` keys use canonical unpadded-decimal family ids.
+- `schema/wal-catalog.schema.json` — validates the FORMAT 8 v3 catalog shape;
+  segment object keys are derived and are not JSON fields.
 
 ### Conformance
-- `conformance/README.md` — added notes for fixture authors: u64 upper-bound
-  constraints are not enforceable by JSON Schema validators using IEEE 754 doubles
-  and must be checked by the harness; several cross-field equality rules (WAL
-  catalog key/entry consistency) are likewise out of schema scope; and the
-  repository's own `.gitignore` excludes `*.log`, which would silently exclude a
-  WAL fixture literally named `wal.log` unless the fixture directory is exempted.
+- `conformance/README.md` — records current partial fixture coverage and notes that
+  u64 upper bounds and cross-field/chain invariants need harness validation.

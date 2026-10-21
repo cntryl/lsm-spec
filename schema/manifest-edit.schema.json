@@ -1,49 +1,258 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/cntryl/lsm-spec/schema/manifest-edit.schema.json",
-  "title": "ManifestJournalRecord",
-  "description": "JSON payload shapes for manifest.journal records. See format/manifest.md §4.2-§4.4. Exact tagged-union wire shape is flagged TODO: verify in the format doc; this schema reflects the field-name-based structure a decoder must accept, not a byte-for-byte-confirmed wire contract.",
+  "title": "ManifestJournalPayload",
+  "description": "JSON payload of one FORMAT 8 manifest journal edit, batch, or fsync marker. The record type byte and framing are specified in format/manifest.md §4.1-§4.4.",
   "$defs": {
-    "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-    "u64": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-    "sstName": { "type": "string", "pattern": "^[^/\\\\:\\u0000]+\\.sst$" },
-    "fileMeta": { "$ref": "manifest.schema.json#/$defs/fileMeta" },
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "sstName": {
+      "$ref": "manifest.schema.json#/$defs/sstName"
+    },
     "edit": {
       "oneOf": [
-        { "type": "object", "required": ["AddSst"], "additionalProperties": false, "properties": { "AddSst": { "$ref": "#/$defs/fileMeta" } } },
-        { "type": "object", "required": ["RemoveSst"], "additionalProperties": false, "properties": { "RemoveSst": { "type": "object", "required": ["name"], "properties": { "name": { "$ref": "#/$defs/sstName" } } } } },
-        { "type": "object", "required": ["CreateColumnFamily"], "additionalProperties": false, "properties": { "CreateColumnFamily": { "type": "object", "required": ["id", "name", "created_at"], "properties": { "id": { "$ref": "#/$defs/u32" }, "name": { "type": "string" }, "created_at": { "$ref": "#/$defs/u64" } } } } },
-        { "type": "object", "required": ["DropColumnFamily"], "additionalProperties": false, "properties": { "DropColumnFamily": { "type": "object", "required": ["id"], "properties": { "id": { "$ref": "#/$defs/u32" } } } } },
-        { "type": "object", "required": ["DropColumnFamilyAt"], "additionalProperties": false, "properties": { "DropColumnFamilyAt": { "type": "object", "required": ["id", "drop_sequence", "dropped_sst_names"], "properties": { "id": { "$ref": "#/$defs/u32" }, "drop_sequence": { "$ref": "#/$defs/u64" }, "dropped_sst_names": { "type": "array", "items": { "$ref": "#/$defs/sstName" } } } } } },
-        { "type": "object", "required": ["ReclaimColumnFamily"], "additionalProperties": false, "properties": { "ReclaimColumnFamily": { "type": "object", "required": ["id", "names"], "properties": { "id": { "$ref": "#/$defs/u32" }, "names": { "type": "array", "items": { "$ref": "#/$defs/sstName" } } } } } },
-        { "type": "object", "required": ["BumpWalSeq"], "additionalProperties": false, "properties": { "BumpWalSeq": { "type": "object", "required": ["seq"], "properties": { "seq": { "$ref": "#/$defs/u64" } } } } },
-        { "type": "object", "required": ["BumpNextSstSeq"], "additionalProperties": false, "properties": { "BumpNextSstSeq": { "type": "object", "required": ["cf_id", "next_seq"], "properties": { "cf_id": { "$ref": "#/$defs/u32" }, "next_seq": { "$ref": "#/$defs/u64" } } } } },
-        { "type": "object", "required": ["SetCloudCheckpoint"], "additionalProperties": false, "properties": { "SetCloudCheckpoint": { "$ref": "manifest.schema.json#/$defs/cloudCheckpoint" } } },
-        { "type": "object", "required": ["Batch"], "additionalProperties": false, "properties": { "Batch": { "type": "array", "items": { "$ref": "#/$defs/edit" } } } }
+        {
+          "type": "object",
+          "required": [
+            "AddSst"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "AddSst": {
+              "$ref": "manifest.schema.json#/$defs/fileMeta"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "RemoveSst"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "RemoveSst": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "$ref": "#/$defs/sstName"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "CreateColumnFamily"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "CreateColumnFamily": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "created_at"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                },
+                "name": {
+                  "type": "string",
+                  "not": {
+                    "const": "default"
+                  }
+                },
+                "created_at": {
+                  "$ref": "#/$defs/u64"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "DropColumnFamilyAt"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "DropColumnFamilyAt": {
+              "type": "object",
+              "required": [
+                "id",
+                "drop_sequence",
+                "dropped_sst_names"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                },
+                "drop_sequence": {
+                  "$ref": "#/$defs/u64"
+                },
+                "dropped_sst_names": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/sstName"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ReclaimColumnFamily"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ReclaimColumnFamily": {
+              "type": "object",
+              "required": [
+                "id",
+                "names"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                },
+                "names": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/sstName"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "BumpNextSstSeq"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "BumpNextSstSeq": {
+              "type": "object",
+              "required": [
+                "cf_id",
+                "next_seq"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "cf_id": {
+                  "$ref": "#/$defs/u32"
+                },
+                "next_seq": {
+                  "$ref": "#/$defs/u64"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "AdvanceFlushFrontier"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "AdvanceFlushFrontier": {
+              "type": "object",
+              "required": [
+                "cf_id",
+                "freeze_sequence"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "cf_id": {
+                  "$ref": "#/$defs/u32"
+                },
+                "freeze_sequence": {
+                  "$ref": "#/$defs/u64"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "Batch"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "Batch": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/edit"
+              }
+            }
+          }
+        }
       ]
     }
   },
   "oneOf": [
     {
-      "type": "object",
       "title": "EditEnvelope",
-      "required": ["edit_id", "edit"],
+      "type": "object",
+      "required": [
+        "edit_id",
+        "edit"
+      ],
       "additionalProperties": false,
       "properties": {
-        "edit_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-        "edit": { "$ref": "#/$defs/edit" }
+        "edit_id": {
+          "$ref": "#/$defs/u64"
+        },
+        "edit": {
+          "$ref": "#/$defs/edit"
+        }
       }
     },
-    { "title": "LegacyBareEdit", "$ref": "#/$defs/edit" },
     {
-      "type": "object",
       "title": "FsyncMarker",
-      "required": ["last_persisted_sequence", "ts_millis"],
+      "type": "object",
+      "required": [
+        "last_persisted_sequence",
+        "ts_millis"
+      ],
       "additionalProperties": false,
       "properties": {
-        "last_persisted_sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-        "ts_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+        "last_persisted_sequence": {
+          "$ref": "#/$defs/u64"
+        },
+        "ts_millis": {
+          "$ref": "#/$defs/u64"
+        }
       }
     }
-  ]
+  ],
+  "$comment": "A reader must reject legacy bare edit enums. The framing record_type must match the edit variant; this cross-field constraint is checked by the journal reader, not this payload schema."
 }

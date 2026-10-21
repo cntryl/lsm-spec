@@ -9,8 +9,8 @@
   authoritative for persisted bytes.
 - `schema/` contains JSON Schema projections used to validate decoded fixtures.
   Wire layouts in `format/` remain authoritative.
-- `conformance/` defines interoperability and fixture requirements. No golden
-  fixtures are published yet.
+- `conformance/` defines interoperability and fixture requirements. Published
+  release and schema-validation fixtures live under `fixtures/`.
 - `notes/` contains non-normative research and implementation findings.
 
 ## Build, Test, and Development Commands
