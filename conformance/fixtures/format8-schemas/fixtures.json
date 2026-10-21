@@ -1,0 +1,73 @@
+{
+  "fixtures": [
+    {
+      "id": "manifest-edit-add-sst-envelope",
+      "schema": "../../../schema/manifest-edit.schema.json",
+      "references": [
+        "../../../schema/manifest.schema.json"
+      ],
+      "path": "valid/manifest-edit-add-sst.json",
+      "expected": "accept"
+    },
+    {
+      "id": "manifest-edit-bare-legacy-shape",
+      "schema": "../../../schema/manifest-edit.schema.json",
+      "references": [
+        "../../../schema/manifest.schema.json"
+      ],
+      "path": "invalid/manifest-edit-bare.json",
+      "expected": "reject"
+    },
+    {
+      "id": "wal-compressed-txn-batch",
+      "schema": "../../../schema/wal.schema.json",
+      "references": [
+        "../../../schema/value-encoding.schema.json"
+      ],
+      "path": "valid/wal-compressed-txn-batch.json",
+      "expected": "accept"
+    },
+    {
+      "id": "wal-txn-batch-missing-value",
+      "schema": "../../../schema/wal.schema.json",
+      "references": [
+        "../../../schema/value-encoding.schema.json"
+      ],
+      "path": "invalid/wal-txn-batch-missing-value.json",
+      "expected": "reject"
+    },
+    {
+      "id": "wal-txn-batch-orphan-compression",
+      "schema": "../../../schema/wal.schema.json",
+      "references": [
+        "../../../schema/value-encoding.schema.json"
+      ],
+      "path": "invalid/wal-orphan-compression.json",
+      "expected": "reject"
+    },
+    {
+      "id": "empty-cloud-wal-catalog-v3",
+      "schema": "../../../schema/wal-catalog.schema.json",
+      "path": "valid/wal-catalog-empty-v3.json",
+      "expected": "accept"
+    },
+    {
+      "id": "cloud-wal-catalog-unsupported-version",
+      "schema": "../../../schema/wal-catalog.schema.json",
+      "path": "invalid/wal-catalog-version.json",
+      "expected": "reject"
+    },
+    {
+      "id": "wal-ledger-genesis-snapshot",
+      "schema": "../../../schema/wal-ledger.schema.json",
+      "path": "valid/wal-ledger-snapshot.json",
+      "expected": "accept"
+    },
+    {
+      "id": "wal-ledger-unknown-edit",
+      "schema": "../../../schema/wal-ledger.schema.json",
+      "path": "invalid/wal-ledger-unknown-edit.json",
+      "expected": "reject"
+    }
+  ]
+}

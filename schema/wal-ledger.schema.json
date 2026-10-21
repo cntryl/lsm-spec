@@ -1,0 +1,1212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cntryl/lsm-spec/schema/wal-ledger.schema.json",
+  "title": "WalLedgerFramePayload",
+  "description": "Decoded JSON payload of one FORMAT 8 wal/LEDGER frame. It does not describe LEDGER binary framing, header, or CRC bytes. See format/wal.md §1.1.1.",
+  "$defs": {
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "digest128": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      }
+    },
+    "chainLink": {
+      "type": "object",
+      "required": [
+        "id",
+        "last_seq",
+        "digest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "last_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "digest": {
+          "type": "array",
+          "minItems": 16,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        }
+      }
+    },
+    "openFacts": {
+      "type": "object",
+      "required": [
+        "id",
+        "epoch",
+        "first_seq",
+        "prev"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "first_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "prev": {
+          "type": "object",
+          "required": [
+            "id",
+            "last_seq",
+            "digest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "digest": {
+              "type": "array",
+              "minItems": 16,
+              "maxItems": 16,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        }
+      }
+    },
+    "sealedFacts": {
+      "type": "object",
+      "required": [
+        "link",
+        "record_count",
+        "data_len",
+        "max_seq_per_cf"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "link": {
+          "type": "object",
+          "required": [
+            "id",
+            "last_seq",
+            "digest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "digest": {
+              "type": "array",
+              "minItems": 16,
+              "maxItems": 16,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "data_len": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "max_seq_per_cf": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      }
+    },
+    "member": {
+      "type": "object",
+      "required": [
+        "open",
+        "sealed",
+        "durable_bytes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "open": {
+          "type": "object",
+          "required": [
+            "id",
+            "epoch",
+            "first_seq",
+            "prev"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "first_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "prev": {
+              "type": "object",
+              "required": [
+                "id",
+                "last_seq",
+                "digest"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "last_seq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "digest": {
+                  "type": "array",
+                  "minItems": 16,
+                  "maxItems": 16,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              }
+            }
+          }
+        },
+        "sealed": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "link",
+                "record_count",
+                "data_len",
+                "max_seq_per_cf"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "link": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "last_seq",
+                    "digest"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "last_seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "digest": {
+                      "type": "array",
+                      "minItems": 16,
+                      "maxItems": 16,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255
+                      }
+                    }
+                  }
+                },
+                "record_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "data_len": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "max_seq_per_cf": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      }
+                    ],
+                    "items": false,
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durable_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "required": [
+        "holder",
+        "anchor",
+        "members",
+        "next_segment_id",
+        "seq_reserved_through"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "holder": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "anchor": {
+          "type": "object",
+          "required": [
+            "id",
+            "last_seq",
+            "digest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "digest": {
+              "type": "array",
+              "minItems": 16,
+              "maxItems": 16,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "open",
+              "sealed",
+              "durable_bytes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "open": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "epoch",
+                  "first_seq",
+                  "prev"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  },
+                  "epoch": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  },
+                  "first_seq": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  },
+                  "prev": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "last_seq",
+                      "digest"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      },
+                      "last_seq": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      },
+                      "digest": {
+                        "type": "array",
+                        "minItems": 16,
+                        "maxItems": 16,
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 255
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "sealed": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "link",
+                      "record_count",
+                      "data_len",
+                      "max_seq_per_cf"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "link": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "last_seq",
+                          "digest"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 18446744073709551615
+                          },
+                          "last_seq": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 18446744073709551615
+                          },
+                          "digest": {
+                            "type": "array",
+                            "minItems": 16,
+                            "maxItems": 16,
+                            "items": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 255
+                            }
+                          }
+                        }
+                      },
+                      "record_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      },
+                      "data_len": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 18446744073709551615
+                      },
+                      "max_seq_per_cf": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "prefixItems": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 18446744073709551615
+                            }
+                          ],
+                          "items": false,
+                          "minItems": 2,
+                          "maxItems": 2
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "durable_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "next_segment_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "seq_reserved_through": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "edit": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "Rotate"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "Rotate": {
+              "type": "object",
+              "required": [
+                "sealed",
+                "open"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "sealed": {
+                  "type": "object",
+                  "required": [
+                    "link",
+                    "record_count",
+                    "data_len",
+                    "max_seq_per_cf"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "link": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "last_seq",
+                        "digest"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "last_seq": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "digest": {
+                          "type": "array",
+                          "minItems": 16,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    },
+                    "record_count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "data_len": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "max_seq_per_cf": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "prefixItems": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4294967295
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 18446744073709551615
+                          }
+                        ],
+                        "items": false,
+                        "minItems": 2,
+                        "maxItems": 2
+                      }
+                    }
+                  }
+                },
+                "open": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "epoch",
+                    "first_seq",
+                    "prev"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "first_seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "prev": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "last_seq",
+                        "digest"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "last_seq": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "digest": {
+                          "type": "array",
+                          "minItems": 16,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "Reopen"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "Reopen": {
+              "type": "object",
+              "required": [
+                "open"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "open": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "epoch",
+                    "first_seq",
+                    "prev"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "first_seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "prev": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "last_seq",
+                        "digest"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "last_seq": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "digest": {
+                          "type": "array",
+                          "minItems": 16,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "AdvanceLogStart"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "AdvanceLogStart": {
+              "type": "object",
+              "required": [
+                "to"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "to": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "SetAside"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "SetAside": {
+              "type": "object",
+              "required": [
+                "from",
+                "cut",
+                "open"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "from": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "cut": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "link",
+                        "record_count",
+                        "data_len",
+                        "max_seq_per_cf"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "link": {
+                          "type": "object",
+                          "required": [
+                            "id",
+                            "last_seq",
+                            "digest"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "id": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 18446744073709551615
+                            },
+                            "last_seq": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 18446744073709551615
+                            },
+                            "digest": {
+                              "type": "array",
+                              "minItems": 16,
+                              "maxItems": 16,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        },
+                        "record_count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "data_len": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "max_seq_per_cf": {
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "prefixItems": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4294967295
+                              },
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              }
+                            ],
+                            "items": false,
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "open": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "epoch",
+                    "first_seq",
+                    "prev"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "first_seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "prev": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "last_seq",
+                        "digest"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "last_seq": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "digest": {
+                          "type": "array",
+                          "minItems": 16,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "Rebase"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "Rebase": {
+              "type": "object",
+              "required": [
+                "anchor",
+                "open"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "anchor": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "last_seq",
+                    "digest"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "last_seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "digest": {
+                      "type": "array",
+                      "minItems": 16,
+                      "maxItems": 16,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255
+                      }
+                    }
+                  }
+                },
+                "open": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "epoch",
+                    "first_seq",
+                    "prev"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "first_seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "prev": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "last_seq",
+                        "digest"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "last_seq": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 18446744073709551615
+                        },
+                        "digest": {
+                          "type": "array",
+                          "minItems": 16,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "Reserve"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "Reserve": {
+              "type": "object",
+              "required": [
+                "through"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "through": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "SyncOpen"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "SyncOpen": {
+              "type": "object",
+              "required": [
+                "id",
+                "through_bytes"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "through_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "SalvageOpen"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "SalvageOpen": {
+              "type": "object",
+              "required": [
+                "id",
+                "valid_bytes",
+                "floor"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "valid_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "floor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "Snapshot"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "Snapshot": {
+          "$ref": "#/$defs/ledger"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "Edit"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "Edit": {
+          "$ref": "#/$defs/edit"
+        }
+      }
+    }
+  ],
+  "$comment": "JSON Schema validates local payload shape only. The reader must verify the ledger state is reachable from genesis, members form one chain, only the last member is open, and edits apply in order."
+}

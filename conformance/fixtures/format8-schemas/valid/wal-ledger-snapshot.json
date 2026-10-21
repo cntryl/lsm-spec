@@ -1,0 +1,28 @@
+{
+  "Snapshot": {
+    "holder": "00000000-0000-0000-0000-000000000001",
+    "anchor": {
+      "id": 0,
+      "last_seq": 0,
+      "digest": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    "members": [
+      {
+        "open": {
+          "id": 1,
+          "epoch": 1,
+          "first_seq": 1,
+          "prev": {
+            "id": 0,
+            "last_seq": 0,
+            "digest": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          }
+        },
+        "sealed": null,
+        "durable_bytes": 128
+      }
+    ],
+    "next_segment_id": 2,
+    "seq_reserved_through": 0
+  }
+}

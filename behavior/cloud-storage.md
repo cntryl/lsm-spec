@@ -62,7 +62,40 @@ A retry may reuse an output name only after the prior object has been proven
 removed. Publication must be conditional and must not overwrite an object whose
 identity was not removed or verified.
 
-## 5. Protocol requirements and implementation policy
+## 5. WAL publication catalog recovery
+
+The WAL publication catalog's primary object is authoritative. Its mirror is a
+recovery copy, not a second source of truth. The object names and catalog data shape
+are defined in [`format/wal.md`](../format/wal.md) §1.2.
+
+When loading the catalog:
+
+- If the primary exists and validates, use it and synchronize the mirror from the
+  exact primary bytes. Do not select a newer-looking mirror over a valid primary.
+- If the primary is missing, a valid mirror may restore it. If the primary is
+  structurally corrupt, a valid mirror may also restore it. Restoring or synchronizing
+  either copy must use an identity-conditional write against the object identity
+  observed before the write.
+- A primary that uses an unsupported catalog version is incompatible, not repairable
+  corruption. If validation cannot complete because a resource limit was reached,
+  that uncertainty also must not authorize replacement from the mirror. In either
+  case, fail without changing either copy.
+- If both copies are absent, no catalog exists. If neither copy validates, recovery
+  fails; a reader must not guess which bytes represent the committed history.
+
+For each catalog mutation, a writer must validate its current lease authority and
+compare-and-swap the primary against the identity it read. Only after the primary
+write is confirmed may it synchronize the mirror, using the confirmed primary bytes
+and a conditional write against the mirror identity it observed. A failed or
+ambiguous primary update must be resolved by rereading authority before retrying. If
+the primary was confirmed but mirror synchronization failed, the primary remains
+authoritative; the next successful load repairs the mirror from it.
+
+An empty catalog may be created only as part of acquiring the authority that owns its
+initial fencing epoch. Later mutations require an existing catalog and must not
+silently initialize one.
+
+## 6. Protocol requirements and implementation policy
 
 The range status, offsets, total length, body length, observed object identity,
 and GCS XML bodyless-request framing are protocol requirements. A conforming

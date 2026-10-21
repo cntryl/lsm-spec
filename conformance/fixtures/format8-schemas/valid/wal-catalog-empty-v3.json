@@ -1,0 +1,13 @@
+{
+  "format_version": 3,
+  "fencing_epoch": 1,
+  "anchor": {
+    "id": 0,
+    "last_seq": 0,
+    "digest": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  },
+  "next_segment_id": 1,
+  "seq_floor": 0,
+  "retired_by": 0,
+  "segments": []
+}

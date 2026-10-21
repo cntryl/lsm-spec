@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "id": "midge-v0.4.1-format8-populated-local",
+      "classification": "reader-compatibility",
+      "source": {
+        "repository": "https://github.com/cntryl/midge",
+        "version": "v0.4.1",
+        "commit": "1bfa5c32e9300c4486c4969c386ca7dbc7622b24",
+        "path": "tests/fixtures/compatibility/v8_populated_v4_sst_db"
+      },
+      "path": "populated-local",
+      "format_version": 8,
+      "manifest_schema": "../../../schema/manifest.schema.json",
+      "expected_format_marker": "midge-format-version=8\n"
+    },
+    {
+      "id": "manifest-missing-default-frontier",
+      "classification": "malformed-input",
+      "path": "invalid/missing-default-frontier.json",
+      "manifest_schema": "../../../schema/manifest.schema.json",
+      "schema_expected": "accept",
+      "reader_expected": "reject: default family frontier is missing"
+    },
+    {
+      "id": "manifest-unsafe-sst-name",
+      "classification": "schema-invalid",
+      "path": "invalid/unsafe-sst-name.json",
+      "manifest_schema": "../../../schema/manifest.schema.json",
+      "schema_expected": "reject"
+    }
+  ]
+}

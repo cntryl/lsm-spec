@@ -1,0 +1,11 @@
+{
+  "flushed_through": [
+    { "cf_id": 1, "through_sequence": 5 }
+  ],
+  "files": [],
+  "column_families": [
+    { "id": 1, "name": "secondary", "created_at": 1, "reclaimed": false }
+  ],
+  "next_sst_seqs": {},
+  "edit_checkpoint_id": 0
+}

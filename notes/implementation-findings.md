@@ -15,6 +15,32 @@ The engines are referred to below as **engine R** (a Rust implementation) and
 produced spec version `0.1.0-dev`; they are not maintained in step with either engine
 and should be re-verified before being relied on.
 
+## FORMAT 8 profile evidence checked 2026-10-21
+
+The following source evidence was rechecked against the latest released Midge
+`v0.4.1` (`1bfa5c32e9300c4486c4969c386ca7dbc7622b24`) while preparing the FORMAT 8
+profile. The requirements themselves live in `format/`; these notes record source
+provenance and implementation gaps only.
+
+- **Compressed `TxnBatch` outer value** — Midge's writer may compress the complete
+  outer `VALUE` payload, and `src/wal/encoding.rs` has
+  `should_roundtrip_txn_batch_outer_record_carrying_compression_tag`. FORMAT 8 allows
+  this; nested operation values remain raw.
+- **Legacy `manifest.json`** — Midge loads it only when
+  `manifest.snapshot.json` is absent. FORMAT 8 checkpoints write the snapshot and
+  truncate the journal; they do not write or synchronize `manifest.json`.
+- **Persisted SST names** — Midge validates one safe relative `.sst` path component.
+  Its generated padded filename is not required by the manifest reader.
+- **Cloud catalog repair** — the primary catalog is authoritative. A validated
+  mirror may restore a missing or structurally corrupt primary; resource-limit and
+  incompatible-version failures do not permit repair. Mutations confirm the primary
+  before updating the mirror from its exact bytes.
+- **Orphan WAL `COMPRESSION` tag** — Midge's `decode_view` currently accepts a
+  `COMPRESSION` TLV even when no `VALUE` TLV exists; the owned decoder then ignores
+  it because there is no value to decompress. The writer never emits this shape and
+  the inspected tests do not cover it. FORMAT 8 treats it as malformed, so Midge's
+  lenient reader remains a conformance gap to close if strict rejection is retained.
+
 ## 1. Divergences from the specification
 
 Each entry is a place where an engine does not implement what `format/` requires. In

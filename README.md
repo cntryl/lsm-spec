@@ -43,8 +43,11 @@ that section's **Open questions**.
 
 ## Status
 
-`0.1.0-dev` (see `VERSION`). Format documents are draft. No conformance fixtures are
-published yet; see `conformance/README.md`.
+`1.0.0-dev` (see `VERSION`). Format documents define the draft FORMAT 8 profile:
+manifest FORMAT 8, WAL payload/ledger/segment versions 2/2/2, SST V4, and cloud WAL
+catalog v3. The conformance set includes a populated FORMAT 8 compatibility fixture
+and schema-validation examples; it is not yet a complete byte-level conformance suite.
+See `conformance/README.md`.
 
 ## Versioning
 
