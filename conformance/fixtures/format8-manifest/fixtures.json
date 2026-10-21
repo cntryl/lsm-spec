@@ -11,6 +11,7 @@
       },
       "path": "populated-local",
       "format_version": 8,
+      "schema_expected": "accept",
       "manifest_schema": "../../../schema/manifest.schema.json",
       "expected_format_marker": "midge-format-version=8\n"
     },

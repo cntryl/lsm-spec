@@ -25,6 +25,8 @@
 - `conformance/README.md` — conformance requirements.
 
 ### Changed
+- The populated FORMAT 8 fixture now declares schema acceptance separately from
+  reader-level behavior.
 - `README.md` and `AGENTS.md` now make the authority direction explicit: existing
   implementations are research evidence used to reconstruct the formats, while this
   specification is the normative source of truth implementations must follow.
