@@ -13,6 +13,8 @@
 - `schema/wal-ledger.schema.json` and FORMAT 8 manifest, journal, WAL record, and
   cloud catalog schema-validation fixtures.
 - WAL publication catalog recovery rules in `behavior/cloud-storage.md`.
+- `behavior/compaction.md` — source-fragment preservation, stale-plan publication,
+  L0 priority, and recovery across manifest publication.
 
 - `behavior/cloud-storage.md` — identity-pinned cloud ranges, GCS XML request
   framing, and recovery of proven unpublished compaction outputs.
