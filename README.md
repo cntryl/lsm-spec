@@ -22,7 +22,8 @@ findings belong in `notes/`, which is non-normative.
 ## Contents
 
 - **`format/`** — on-disk byte layouts: WAL, SST, manifest, file lease, and the
-  shared value-encoding primitives they share.
+  shared value-encoding primitives they share. Binary control frames and intents
+  are in `format/metadata.md`; cloud authority is in `format/cloud-metadata.md`.
 - **`schema/`** — machine-checkable schema definitions mirroring `format/`.
 - **`behavior/`** — behavioral contracts (conflict resolution, durability windows,
   recovery semantics). Compaction and source-fragmentation rules are in
@@ -44,11 +45,13 @@ that section's **Open questions**.
 
 ## Status
 
-`1.0.0-dev` (see `VERSION`). Format documents define the draft FORMAT 8 profile:
-manifest FORMAT 8, WAL payload/ledger/segment versions 2/2/2, SST V4, and cloud WAL
-catalog v3. The conformance set includes a populated FORMAT 8 compatibility fixture
-and schema-validation examples; it is not yet a complete byte-level conformance suite.
-See `conformance/README.md`.
+`1.0.0-dev` (see `VERSION`). Format documents define the draft FORMAT 9 profile:
+manifest FORMAT 9 with binary metadata, WAL payload/ledger/segment versions
+2/2/2, SST V5, cloud WAL catalog v3, cloud metadata layout v2, lease v4 and
+sentinel v3. The conformance set includes empty and populated FORMAT 9 fixtures,
+historical FORMAT 8 compatibility evidence and schema-validation examples;
+it is not yet a complete byte-level conformance suite. See
+`conformance/README.md`.
 
 ## Versioning
 

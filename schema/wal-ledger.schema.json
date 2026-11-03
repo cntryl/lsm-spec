@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/cntryl/lsm-spec/schema/wal-ledger.schema.json",
   "title": "WalLedgerFramePayload",
-  "description": "Decoded JSON payload of one FORMAT 8 wal/LEDGER frame. It does not describe LEDGER binary framing, header, or CRC bytes. See format/wal.md §1.1.1.",
+  "description": "Decoded JSON payload of one FORMAT 9 wal/LEDGER frame. It does not describe LEDGER binary framing, header, or CRC bytes. See format/wal.md §1.1.1.",
   "$defs": {
     "u64": {
       "type": "integer",

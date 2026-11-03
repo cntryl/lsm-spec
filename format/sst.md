@@ -72,127 +72,84 @@ key.
 
 ## 3. Data block format
 
-### 3.1 Block content: a sequence of entries
+### 3.1 Data extent and restart directory
 
-A decompressed data block's payload is simply a concatenation of variable-length
-entries, back to back, with no block-level entry count or index — a reader consumes
-entries sequentially until the decompressed byte range is exhausted. There is no
-trailing restart-offset array inside the block itself (contrast with some other LSM
-block formats, e.g. classic SSTable/RocksDB block footers) — **TODO: verify** whether
-this is intentional (index-block-driven seeks make an in-block restart array
-unnecessary because the accelerator structures in §4 always resolve to a specific
-data block, then the reader linearly scans that one block) or an omission worth
-revisiting.
+A decompressed V5 data block contains entries followed by a restart directory:
 
-### 3.2 Entry encoding
+```
+[entry bytes][restart words: u32 LE repeated count times][count: u32 LE]
+```
 
-Each entry uses a packed binary layout (not TLV — TLV is reserved for block-level
-metadata elsewhere in the file). Entry length is fully determined by its header, so
-decoding is allocation-free and zero-copy.
+The count must be positive. Subtract `4 + 4 * count` from the decompressed
+length using checked arithmetic to locate the end of the entry extent. That
+extent must be nonempty and smaller than 2 GiB. Each restart word contains an
+entry offset in bits 0–30 and a continued-user-key flag in bit 31. Offsets must
+be strictly increasing, lie inside the entry extent and point to complete
+independent entries. The first word must be exactly zero. Entries must tile
+the data extent without gaps, overlaps or trailing bytes; an entry must not
+cross a restart boundary. The directory is inside the ordinary compressed and
+checksummed block wrapper (§5).
 
-Base header (26 bytes), little-endian:
+Writers emit an independent restart every 16 entries, including entry zero.
+Readers must use the encoded offsets rather than infer positions from a
+fixed entry size. Every restart entry has `shared_prefix_len = 0`.
 
-| Field | Size | Offset | Description |
-|---|---|---|---|
-| `shared_prefix_len` | u16 | 0 | Number of leading bytes this entry's key shares with the *previous* entry's full key in this block (see §3.3). |
-| `key_delta_len` | u16 | 2 | Length of the key suffix that follows (the non-shared remainder), unless equal to `0xFFFF` — see the extended form below. |
-| `value_len` | u32 | 4 | Length of the value payload, unless `key_delta_len == 0xFFFF` and this field is `0xFFFFFFFF` — see the extended form below. |
-| `sequence` | u64 | 8 | Sequence number for this entry (used for MVCC ordering and to pick the newest version of a key). |
-| `entry_type` | u8 | 16 | One of `Put = 0`, `Insert = 1`, `Delete = 2`, `Merge = 3`. |
-| `expiration_present` | u8 | 17 | `0` or `1`. Any other value is corruption. |
-| `expiration_millis` | u64 | 18 | TTL expiration timestamp. Must be `0` when `expiration_present == 0` (non-canonical nonzero bytes with `expiration_present == 0` are treated as corruption, not silently ignored) — this makes "no TTL" and "TTL exactly at Unix epoch 0" and "TTL at `u64::MAX`" all distinguishable, unlike an earlier encoding that could not represent a `None`/`Some(u64::MAX)` distinction. |
+### 3.2 Compact entry encoding
 
-**`Merge` (`entry_type = 3`) is RESERVED as of this spec version.** This document
-defines its wire encoding (identical framing to `Put`/`Insert`, so a reader must
-still be able to parse one structurally) but no merge-operator semantics exist yet
-anywhere in this specification — how multiple `Merge` operands for the same key would
-combine into a resolved value, and whether that resolution happens at read time or
-at compaction time, are both undefined. No operation in [`wal.md`](wal.md)'s `OP`
-registry (§5.1) produces a `Merge` record either, so there is no defined path from a
-conforming WAL writer to a `Merge` SST entry in the first place. **A conforming
-writer MUST NOT emit `entry_type = 3` until a future revision of this spec defines
-merge-operator semantics.**
+Fields appear in this order:
 
-A reader MUST treat the extended form as in use if and only if **both**
-`key_delta_len == 0xFFFF` **and** `value_len == 0xFFFFFFFF` hold in the base header
-— this conjunctive (both-fields) check, not a single-field check against
-`key_delta_len` alone, is the reader-side trigger. When it holds, an **extended
-length block** immediately follows the base header, before the key bytes:
-
-| Field | Size | Description |
+| Field | Encoding | Meaning |
 |---|---|---|
-| `extended_key_delta_len` | u32 | Real key-delta length (used instead of the u16 field). |
-| `extended_value_len` | u32 | Real value length (used instead of the u32 marker field). |
+| `shared_prefix_len` | canonical unsigned varint | Shared bytes of the preceding full key; at most 65,535. |
+| `key_delta_len` | canonical unsigned varint | Following key suffix length, at most `u32::MAX`. |
+| `value_len` | canonical unsigned varint | Following value length, at most `u32::MAX`. |
+| `sequence` | u64 little-endian | MVCC sequence. |
+| `flags` | u8 | Bits 0–1: `Put = 0`, `Insert = 1`, `Delete = 2`, reserved `Merge = 3`; bit 7: expiration present. Bits 2–6 must be zero. |
+| `expiration_millis` | u64 little-endian, only when bit 7 is set | Unsigned Unix-millisecond expiry, including zero and `u64::MAX`. |
+| `key_delta` | `key_delta_len` bytes | Unshared key suffix. |
+| `value` | `value_len` bytes | Value bytes. |
 
-This lets a key delta exceed its inline u16 field's range and lets the marker pair
-represent legitimate lengths while keeping the common case's header at 26 bytes.
-Because both extended lengths are u32 values, neither real length may exceed
-4,294,967,295 bytes (`u32::MAX`); a writer MUST reject an entry whose key delta or
-value exceeds that limit.
+Varints are unsigned base-128, least-significant group first, with bit 7
+indicating continuation. At most five bytes are allowed; the fifth byte must
+be at most `0x0f`. An extra zero terminal group, overflow, an unterminated
+varint, unknown flag bits, or any truncated extent is corruption. There is no
+V4 extended-length sentinel or fixed 26-byte header. Small lengths and no TTL
+produce a 12-byte header.
 
-**Writer requirement — precise version** (revised; see the note below on why an
-earlier version of this rule was stricter than necessary): a writer MUST use the
-extended form whenever any of the following hold, and MAY use it more liberally at
-its own discretion:
-- the real key-delta length exceeds 65,535 bytes (physically doesn't fit the
-  inline u16 field), or
-- the real key-delta length is *exactly* 65,535 bytes **and** the real value
-  length is *exactly* 4,294,967,295 bytes, simultaneously — the one combination
-  that would otherwise be indistinguishable from the extended-form marker pair
-  itself if written inline.
+`Merge` has no defined resolution semantics and no WAL source. Writers must
+not emit it; readers must return `CompatibilityError` rather than expose an
+operand as a complete value. A `Delete` must have zero value length; readers
+must reject a value-bearing `Delete` as corruption. `Put` and `Insert` with
+zero length contain an empty value, distinct from a deletion.
 
-A writer is **not** required to promote to the extended form solely because the
-real key-delta length happens to equal exactly 65,535 bytes, as long as the real
-value length is not *also* exactly 4,294,967,295 at the same time — writing
-`key_delta_len = 0xFFFF` as a literal, ordinary length is safe and correctly
-decodable under the conjunctive reader rule above, precisely because the reader
-only treats it as "extended in use" when `value_len` is *also* the sentinel.
+### 3.3 Prefix reconstruction and continued keys
 
-An earlier revision of this document stated a stricter, single-field rule; see
-`CHANGELOG.md`.
+Reconstruct a full key as the first `shared_prefix_len` bytes of the preceding
+full key followed by `key_delta`. The prefix must fit the preceding key; the
+first entry of a block and every restart must be independent. Keys sort
+ascending, with sequences descending within one user key.
 
-Following the (base or extended) header:
+For every restart after the first, bit 31 must be set if and only if its full
+user key equals the last user key in the preceding interval. A reader must
+validate this relationship before using the bit to skip a preceding interval.
+Malformed continuation metadata must not produce a successful miss or hide a
+visible version. A valid checksum alone does not establish that relationship.
 
-```
-[key_delta: key_delta_len bytes][value: value_len bytes, if present]
-```
+Point lookup must include the beginning of a continued user-key run, including
+the preceding interval when needed. Versions may cross arbitrarily many
+restarts and data blocks. Once a visible version is found, a reader may stop
+decoding older versions, but must still check equal-sequence duplicates,
+including across block boundaries, for conflicting values, types or TTLs.
+Reverse scans must preserve the same visibility and ordering contracts.
 
-A `Delete` entry with `value_len == 0` carries no value bytes at all (the value is
-absent, not merely empty) — see §3.4. All other entry types always carry a value
-region of exactly `value_len` bytes, which may itself be zero-length (a legitimate
-empty value, as opposed to Delete's absent value).
+### 3.4 Resource and compatibility bounds
 
-### 3.3 Key-delta (prefix) compression
-
-Keys are stored as the delta relative to the **immediately preceding entry's full
-key in the same block** (`shared_prefix_len` bytes are implicitly copied from that
-previous key, then `key_delta` bytes are appended). The first entry of every data
-block always encodes against an empty "previous key" (i.e. its `shared_prefix_len`
-is 0 and its `key_delta` is its full key) — a data block is always independently
-decodable from its own first byte without needing entries from a neighboring block.
-
-This format defines **no restart points**. There is no in-block restart offset table
-(§3.1) and no reader-visible wire structure that a restart interval could govern. A
-writer that maintains one internally, for its own scan loop, produces no
-distinguishing bytes; see §9.
-
-### 3.4 Tombstones inside a data block
-
-A `Delete`-type entry (`entry_type == 2`) represents a point tombstone for its key.
-Whether it carries a zero-length value or an absent value is significant: a value is
-present (even a zero-length one) for any entry type *other than* `Delete`, and for
-`Delete` entries a value is present only if `value_len > 0` — in the normal case a
-`Delete` is written with `value_len == 0` and therefore has *no* value region at all.
-
-**A `Delete` entry with `value_len > 0` is RESERVED as of this spec version.**
-[`wal.md`](wal.md) §5.1 defines the WAL's `Delete` operation as always value-less
-(`VALUE` TLV tag never permitted), and the WAL, via memtable flush, is the only
-mutation source this specification defines flowing into an SST — so there is no
-defined path from a conforming WAL writer to a value-bearing `Delete` SST entry.
-**A conforming writer MUST NOT set `value_len > 0` on a `Delete` entry** until a
-future revision of this spec defines a use for it; a reader must still decode the
-wire state correctly (per §3.2's general rule) for forward compatibility with a
-future revision that does define one.
+Writers must reject an entry that cannot fit its key/value lengths or the
+64 MiB decompressed block admission bound, including the restart directory
+and worst-case TTL overhead for single-entry admission. Readers must check
+length arithmetic and decompression limits before allocating from untrusted
+lengths. V4 entry bytes are incompatible; no legacy decoder or in-place
+conversion is defined.
 
 ## 4. Accelerator and index structures
 
@@ -351,12 +308,15 @@ little-endian:
 
 | Field | Size | Description |
 |---|---|---|
-| `format_version` | u32 | Must equal the SST format version this document describes (**4**, "V4" — see §9 note on version numbering). Any other value is rejected: known-older versions are treated as an explicit incompatibility (`CompatibilityError`), not silently upgraded; there is no legacy decoder. |
+| `format_version` | u32 | Must equal the SST format version this document describes (**5**, "V5" — see §9 note on version numbering). Any other value is rejected: known-older versions are treated as an explicit incompatibility (`CompatibilityError`), not silently upgraded; there is no legacy decoder. |
 | `index_kind` | u8 | `0` = `Sparse` (full binary index, §4.1 only), `1` = `Trie` (index block **and** trie block both present, §4.2). Any other value is corruption. |
 | `flags` | u8 | Bit 0: key-range metadata present (§6.1). All other bits must be zero; a nonzero unknown bit is corruption, not a silently-ignored future extension. |
 | *(reserved)* | 2 bytes | Must be zero. |
 | `range_tombstone_handle` | 16 bytes (`offset` u64 + `size` u64) | `BlockHandle` for the range-tombstone block (§8), or all-zero if this SST carries no range tombstones. Presence follows §5.1: a positive size is present even at offset 0; a positive offset with zero size is corruption. |
 | *(key-range, only if flag bit 0 set)* | variable | See §6.1. |
+
+A 20-byte legacy meta block is incompatible; a 21–23-byte block is truncated
+and corrupt.
 
 If the key-range flag is clear, the meta block must end exactly at the fixed 24-byte
 header (any trailing bytes are corruption). If set, no trailing bytes are permitted
@@ -389,7 +349,7 @@ of the file:
 | `index_handle` | 16 bytes | 16 | `BlockHandle` for the index block (§4.1). |
 | `trie_handle` | 16 bytes | 32 | `BlockHandle` for the trie block (§4.2), or all-zero if absent. |
 | `block_bloom_handle` | 16 bytes | 48 | `BlockHandle` for the block-bloom block (§4.3), or all-zero if absent. |
-| `format_version` | u32 | 64 | Must equal **4**. |
+| `format_version` | u32 | 64 | Must equal **5**. |
 | `footer_size` | u32 | 68 | Must equal **84** (the footer's own encoded size — self-describing, so a future footer revision could in principle change size without breaking a reader that trusts this field over a hardcoded constant, though the current reader in fact hardcodes 84 and treats any other declared value as corruption rather than as a hint to re-read a differently-sized region). |
 | `magic` | u64 | 72 | Fixed magic number `0xDB47_7524_8B80_FB57` (chosen to be RocksDB-SST-footer-compatible in value, not merely coincidentally similar — **TODO: verify** whether byte-for-byte RocksDB footer compatibility beyond this one magic value is an actual design goal or purely incidental reuse of a well-known constant). |
 | `crc32c` | u32 | 80 | CRC32C over footer bytes `[0, 80)` — i.e. every preceding footer field, not including this checksum itself. |
@@ -427,7 +387,7 @@ A reader opens an SST by:
    A reader must not treat the bare-magic check as an independent rule competing
    with the full footer decode: it runs only as a fallback, only after (a) has been
    attempted and failed or was impossible.
-4. Validating `format_version == 4` (`CompatibilityError` if not — including
+4. Validating `format_version == 5` (`CompatibilityError` if not — including
    both older and unknown-future versions; there is no forward-compatible
    best-effort read path).
 5. Using `meta_index_handle` and `index_handle` (and, if present, `trie_handle` /
@@ -472,6 +432,9 @@ repeated count times:
 
 ## 9. Format vs. policy — what's in scope here
 
+The restart directory (§3.1–§3.3), independent keys and validated continuation
+bits are required wire structures.
+
 The following are explicitly **behavioral/policy**, not part of the on-disk format
 contract, and are not required for wire compatibility between two engines that both
 correctly implement §1–§8:
@@ -489,8 +452,6 @@ correctly implement §1–§8:
   In scope: that the chosen kind is recorded in the meta block and that both index
   representations (§4.1, §4.2) must be correctly readable — a reader must handle
   either kind, but never needs to reproduce the *decision* itself.
-- **Restart interval** (§3.3): a writer's internal restart interval, if it keeps one,
-  governs no decodable wire structure and carries no format-compatibility weight.
 - **Bloom filter false-positive rate / hash-function choice / bits-per-key** for the
   per-block filters in §4.3: writer-side accelerator tuning. A reader that cannot or
   chooses not to interpret the inner Bloom filter format can skip the block-bloom
@@ -502,16 +463,10 @@ correctly implement §1–§8:
 
 **Settled:**
 
-- `Merge` (`entry_type = 3`, §3.2) is reserved as of this spec version: no
-  merge-operator contract exists anywhere in this specification, and no WAL
-  operation produces one. The reservation should be lifted in favor of a real
-  specification, rather than standing indefinitely, once merge semantics are
-  defined.
-- A `Delete` entry with `value_len > 0` (§3.4) is reserved as of this spec version:
-  no defined use case exists for it, and no WAL operation produces one.
-- The extended-length promotion boundary (§3.2): the reader's conjunctive check
-  governs, and the minimal writer requirement follows from it. An earlier revision
-  stated a stricter single-field rule, now withdrawn; see `CHANGELOG.md`.
+- V5 deliberately replaces V4's entry headers and adds a restart directory.
+  Reserved `Merge` entries are incompatible; value-bearing deletes are corrupt.
+- Database FORMAT 9 and SST V5 are checked independently. A FORMAT 9 marker
+  cannot authorize reading an SST V4 file.
 
 **Open questions:**
 
@@ -525,7 +480,7 @@ correctly implement §1–§8:
   intentionally left as a swappable accelerator detail (since ignoring it entirely
   remains correct, only slower).
 - **TODO: verify** — Whether a future revision is expected to bump `format_version`
-  past 4 with a defined migration/coexistence story, or whether the expectation is a
+  past 5 with a defined migration/coexistence story, or whether the expectation is a
   hard break with export/import as the only supported upgrade path, as the V1–V3 to
-  V4 transition was. Whether that precedent generalizes to all future bumps is
+  V5 transition was. Whether that precedent generalizes to all future bumps is
   unsettled.

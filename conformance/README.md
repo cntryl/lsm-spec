@@ -24,13 +24,27 @@ An implementation conforms to a given spec version when:
 
 ## Status
 
-`fixtures/format8-manifest/populated-local/` is a populated FORMAT 8 compatibility
-fixture from Midge v0.4.1. It covers the marker, manifest snapshot, legacy manifest
-base, empty journal, intent log, and one SST. Schema-validation examples cover the
-manifest, manifest journal payload, decoded WAL record, cloud catalog, and decoded
-local ledger payload. These are useful contract checks, not a complete byte-level
-conformance suite: there is not yet a full WAL segment/ledger byte fixture, cloud
-publication fixture, or writer round-trip harness.
+`fixtures/format9/` contains empty and populated FORMAT 9 compatibility bytes
+copied unchanged from Midge 0.5.2 main at
+`c684310d9d8ce8ecd1151c47151d4bea98b348cf`. The populated fixture covers one
+SST V5, binary manifest bounds/frontiers, and intent suffix edits. The empty
+fixture covers a kind-1 default manifest. `fixtures.json` records exact source
+paths and expected reads; its JSON examples exercise new manifest/edit fields
+and SST V5 version gates. They are decoded projections, not fabricated binary
+writer output or a cloud qualification claim.
+
+`fixtures/format8-manifest/populated-local/` remains historical FORMAT 8 data
+from Midge v0.4.1. A FORMAT 9 reader must reject its marker without mutation.
+Its JSON manifests can still be checked against the decoded projection schema;
+that does not make their wire format compatible. Historical `format8-schemas/`
+examples continue to exercise unchanged logical fields, WAL records, catalog
+and ledger shapes.
+
+There is not yet a full WAL segment/ledger byte fixture, cloud pointer/version
+closure fixture, nonempty manifest-journal byte fixture, exhaustive intent
+variant corpus, or cross-engine writer round-trip harness. Checksums, wire key
+types, restart continuation correctness and chain invariants need binary reader
+checks; schema success alone cannot establish them.
 
 Malformed reader inputs are kept under `invalid/` and are not conformance writer
 output. Invariants JSON Schema cannot express are explicitly left to an executable
@@ -55,11 +69,14 @@ conformance harness.
   authority, and that `next_segment_id` exceeds every allocated id. A catalog
   segment object's key is derived from its epoch and segment id; no `object_key` is
   serialized in the catalog (`format/wal.md` §1.2.1).
-- **Binary formats have no schema.** The WAL frame and payload layouts, the SST
-  block/entry/footer layouts, and the manifest journal's record framing are
+- **Binary formats use decoded projections.** The WAL frame/payload layouts,
+  SST block/entry/footer layouts, and the manifest journal's record framing are
   normative as byte layouts. The `schema/*.json` files covering them describe a
   *decoded* projection for cross-checking and are not a substitute for byte-level
-  fixtures.
+  fixtures. FORMAT 9 manifest bounds project binary values to lowercase hex;
+  allocator keys project unsigned integers to decimal strings. Cloud authority
+  and intent variants do not yet have complete projection schemas.
 - **Beware `.gitignore`.** The repository ignores `*.log`, which would silently
-  exclude a WAL fixture named `wal.log` — the format's own active-file name. Fixture
-  directories must be exempted before any WAL fixtures are added.
+  exclude a historical fixture named `wal.log`. Current local WAL segments use
+  final numeric names defined in `format/wal.md` §1.1. Exempt fixture directories
+  before adding any `.log` fixtures.

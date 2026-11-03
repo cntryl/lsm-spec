@@ -7,7 +7,7 @@ Status: draft. Requirements use *must*, *must not*, *required*, *should*, and
 
 This document defines data-authority rules for leveled compaction and source
 fragmentation. It does not define planner scoring, work targets, output naming,
-intent encoding, or a particular engine's error types.
+or a particular engine's error types.
 
 ## 2. Source fragmentation
 
@@ -60,8 +60,11 @@ committed data.
 
 ## 5. Implementation policy
 
-The split-selection algorithm, output partition sizing, concurrency mechanism,
-error type, and compaction intent representation are implementation policy.
+The split-selection algorithm, output partition sizing, concurrency mechanism
+and error type are implementation policy. The FORMAT 9 intent representation
+is specified in
+[`format/metadata.md`](../format/metadata.md). Logical level moves and durable
+SST deletion obligations are specified in `format/manifest.md` §5.8–§5.9.
 Implementations may choose different policies while preserving the data,
 publication, and recovery requirements above.
 

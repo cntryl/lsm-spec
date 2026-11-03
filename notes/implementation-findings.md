@@ -246,3 +246,74 @@ validating every manifest-carried SST name at replay time, and having no
 manifest-journal repair-on-next-write mechanism — are recorded as the current state
 of an in-progress implementation, not as confirmed specification violations, and no
 fixes are prescribed for them here.
+
+## FORMAT 9 profile evidence checked 2026-11-03
+
+This amendment was reconstructed against Midge main
+`c684310d9d8ce8ecd1151c47151d4bea98b348cf` (0.5.2). The starting local checkout
+was `1e2ff182e13eb4ba16ba8c7bb11e7550d774a5ae`; fetching main confirmed the
+later release's formats are unchanged. Engine optimization choices do not
+become normative merely because they are present in that implementation.
+
+Deliberate compatibility changes from the historical FORMAT 8 profile:
+
+- `src/metadata/codec.rs` and `codec/framing.rs` establish the 17-byte-overhead
+  MessagePack/CRC32C envelope and bounded prevalidation. `journal.rs` retains
+  the outer type/length record but replaces JSON/IEEE CRC with framed binary
+  and big-endian CRC32C. `key_bounds.rs` distinguishes binary bounds from hex
+  JSON projections. The checksum byte order preserves useful whole-object
+  CRC32C identity, instead of a fixed residue for equal-length objects.
+- `src/runtime/intent_persistence/edits.rs` establishes sequence/checksum-linked
+  suffix edits, atomic checkpoint replacement and torn-tail repair. Runtime
+  FileMeta differs from manifest FileMeta; `protocol.rs` uses byte arrays for
+  bounds while manifest bounds use MessagePack binary values.
+- `src/sst/encoding.rs`, `data_block.rs`, `types.rs`, and reader restart tests
+  establish V5 headers, canonical varints, restart directories and verified
+  continued-key bits. Rejecting Merge and value-bearing Delete deliberately
+  supersedes earlier reader acceptance: unresolved operands are not values,
+  and tombstones cannot carry payloads. The published current SST fixture has
+  finalized V5 writer bytes, not a changed version marker on V4 content.
+- `src/metadata/manifest.rs`, `manifest/transitions.rs`, and `manifest/moves.rs`
+  establish retained delete obligations, exact delete acknowledgements, TTL
+  metadata and logical promotions. These changes preserve original immutable
+  object identity and avoid deletion of moved objects after recovery.
+- `src/lease/cloud/metadata_pointer.rs`, `lease/cloud.rs`,
+  `runtime/hybrid_persistence/metadata_chain.rs`, `metadata_publication/cut.rs`
+  and `runtime/ddl.rs` establish cloud layout v2, independently fenced pointer,
+  lease v4, sentinel v3, exact closure/cut proofs and DDL registry v2. Replacing
+  the lease-embedded pointer prevents heartbeat identity changes from coupling
+  unrelated publications; epoch claims preserve committed predecessor history.
+- The 0.5.2 changes to borrowed index metadata, early version termination and
+  bloom sizing preserve wire compatibility. The 0.1% bloom target is tuning,
+  not a universal required false-positive rate. Conflicting equal-sequence
+  duplicates still require detection when taking an early read result.
+
+No Pants parity or full cross-engine conformance is asserted by this amendment.
+The existing FORMAT 8 fixtures are retained as historical inputs. Missing
+binary/cloud fixture coverage is tracked in `conformance/README.md`.
+
+Validation for this amendment:
+
+- `jq empty schema/*.json` and `git diff --check` passed. Remaining
+  `TODO: verify` items were reviewed; none was introduced by the FORMAT 9 work.
+- Python jsonschema 4.25.1 checked all eight schemas and all 19 indexed JSON
+  examples against their declared accept/reject outcomes. MessagePack 1.1.2
+  and google-crc32c 1.8.0 checked copied frame extents, checksums, decoded
+  manifest projections, intent-chain predecessors, SST V5 footer checksums
+  and whole-file size/CRC. Every copied binary file was compared byte-for-byte
+  with `git show c684310d:<source path>`. These were one-time validation
+  commands outside the repository; no custom runner was added.
+- On a detached checkout of the exact Midge main commit, the following existing
+  Cargo commands passed (117 tests total; no ignored or failed tests):
+
+```sh
+cargo test --test storage_layer --quiet
+cargo test --lib metadata::codec --quiet
+cargo test --lib runtime::intent_persistence --quiet
+cargo test --lib sst::fs::reader_io::tests::restart_v5 --quiet
+cargo test --lib metadata::manifest:: --quiet
+cargo test --lib lease::cloud::metadata_pointer::tests --quiet
+```
+
+This is focused local evidence, not hosted CI, native-provider or Pants
+interoperability qualification.

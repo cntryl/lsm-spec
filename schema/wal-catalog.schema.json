@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/cntryl/lsm-spec/schema/wal-catalog.schema.json",
   "title": "WalPublicationCatalog",
-  "description": "FORMAT 8 cloud WAL publication catalog JSON, format version 3. See format/wal.md §1.2.1.",
+  "description": "FORMAT 9 cloud WAL publication catalog JSON, format version 3. See format/wal.md §1.2.1.",
   "$defs": {
     "u32": {
       "type": "integer",

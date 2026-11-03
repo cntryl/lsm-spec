@@ -1,0 +1,20 @@
+{
+  "footer": {
+    "meta_index_handle": {
+      "offset": 0,
+      "size": 9
+    },
+    "index_handle": {
+      "offset": 9,
+      "size": 9
+    },
+    "format_version": 4,
+    "footer_size": 84,
+    "magic": "0xDB47_7524_8B80_FB57"
+  },
+  "meta": {
+    "format_version": 5,
+    "index_kind": "Sparse"
+  },
+  "index": []
+}

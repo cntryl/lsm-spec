@@ -113,7 +113,7 @@ segment id must match the segment header. An object is eligible for replay only 
 it is named by the cloud publication catalog; an unlisted object is an orphan and
 must not be treated as history.
 
-The FORMAT 8 catalog body is format version 3. Its primary object key is
+The FORMAT 9 catalog body is format version 3. Its primary object key is
 `wal/publication-catalog.v1.json`; its recovery mirror is
 `wal/publication-catalog.v1.mirror.json`. The `.v1` path component is a stable
 object name and does not state the JSON body's format version. The primary catalog is
@@ -235,7 +235,7 @@ checksummed frame whose payload decodes as a record or footer (§6.2).
 
 **TODO: verify** whether a future revision should add a frame-level magic/version to
 allow multiplexing incompatible payload encodings within one physical frame stream,
-or whether the payload-level magic is sufficient permanently. FORMAT 8 uses the
+or whether the payload-level magic is sufficient permanently. FORMAT 9 uses the
 payload version for this gate.
 
 ### 3.2 Zero-length payloads
