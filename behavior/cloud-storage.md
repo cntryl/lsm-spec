@@ -102,9 +102,10 @@ and GCS XML bodyless-request framing are protocol requirements. A conforming
 implementation may choose its own internal error types, retry schedule, range
 size, and storage layout, provided it preserves the observable rules above.
 
-The compaction intent encoding and local cache layout are implementation policy.
-They may differ between engines, provided recovery preserves the stated
-authority, identity, and read-availability guarantees.
+For the FORMAT 9 profile, intent bytes and metadata authority are defined in
+[`format/metadata.md`](../format/metadata.md) and
+[`format/cloud-metadata.md`](../format/cloud-metadata.md). Cache layout and
+internal scheduling remain implementation policy.
 
 ## Open questions
 

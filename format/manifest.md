@@ -28,8 +28,11 @@ from three pieces:
    dedicated to manifest state, with its own framing/checksum scheme independent of
    the data WAL described in [`wal.md`](wal.md).
 3. **A legacy base file** (`manifest.json`) — an older full-state file a reader may
-   use only when no snapshot exists. A FORMAT 8 writer does not create or update this
+   use only when no snapshot exists. A FORMAT 9 writer does not create or update this
    file; when a snapshot exists it is ignored on load.
+
+Despite their `.json` suffixes, both full-state files contain binary kind-1
+frames defined in [`metadata.md`](metadata.md). There is no JSON fallback.
 
 A reader reconstructs current state by loading the most recent snapshot (or the
 legacy base file, or an empty default manifest, depending on what exists — see §5.1),
@@ -48,7 +51,7 @@ root (not a subdirectory, unlike the WAL directory):
 | `manifest.snapshot.json.tmp` | Staging file for an in-progress snapshot write (see §6.3). |
 | `manifest.journal` | Append-only log of edits since the last snapshot checkpoint. |
 | `manifest.journal.repair.tmp` | Staging file used only when truncating a torn journal tail (§6.2). |
-| `manifest.json` | Legacy full-state base accepted only when no snapshot exists; FORMAT 8 writers do not write it. |
+| `manifest.json` | Legacy full-state base accepted only when no snapshot exists; FORMAT 9 writers do not write it. |
 
 None of these files are content-addressed or rotated by an incrementing id the way
 WAL segments are (§1.1 of `wal.md`) — the manifest instead uses a **snapshot +
@@ -71,8 +74,8 @@ midge-format-version=<version>\n
 
 - `midge-format-version` is a fixed literal key. It must be written and matched
   verbatim; the name carries no meaning beyond identifying this marker.
-- A conforming writer emits the canonical decimal value **8**. A reader accepts a
-  marker only when the value parses as an unsigned decimal integer equal to 8; leading
+- A conforming writer emits the canonical decimal value **9**. A reader accepts a
+  marker only when the value parses as an unsigned decimal integer equal to 9; leading
   or trailing whitespace, a sign, non-ASCII digits, or a missing final newline are
   invalid. Leading zeroes are accepted by the reader but must not be emitted by a
   writer.
@@ -92,16 +95,16 @@ This marker is **not** manifest-specific — it is the format gate for the whole
 database directory: opening a directory whose `FORMAT` value the engine doesn't
 understand is refused outright, regardless of which structure (WAL, SST, or
 manifest) within it actually changed between versions. A reader supporting this
-profile supports only value 8; it must reject older and newer values without
+profile supports only value 9; it must reject older and newer values without
 rewriting them. No in-place migration is defined.
 
 This integer is not the same value as, and has no arithmetic relationship to, the
-version fields embedded in individual structures. The FORMAT 8 profile uses SST
-footer version 4 (`sst.md` §6–§7), WAL record payload version 2 (`wal.md` §4.1), WAL
+version fields embedded in individual structures. The FORMAT 9 profile uses SST
+footer version 5 (`sst.md` §6–§7), WAL record payload version 2 (`wal.md` §4.1), WAL
 ledger version 2, WAL segment header version 2 and footer version 1, and cloud WAL
 publication catalog version 3 (`wal.md` §1.2.1). Each gate is checked independently;
 none is inferred from another. A reader must reject any structure version it does not
-support even when the directory marker is 8.
+support even when the directory marker is 9.
 
 The FORMAT marker is created only after the root has been established as a new
 database. A root containing a manifest, journal, intent log, or non-empty `wal` or
@@ -133,7 +136,7 @@ from, the WAL's frame format (`wal.md` §3):
 
 ```
 +------------------+-------------------+-----------------------------+------------------+
-| record_type (u8) | payload_len (u32) | payload (payload_len bytes) | crc32 (u32)      |
+| record_type (u8) | payload_len (u32) | payload (payload_len bytes) | crc32c (u32)     |
 | offset 0..1      | offset 1..5       | offset 5..(5+payload_len)   | trailing 4 bytes |
 +------------------+-------------------+-----------------------------+------------------+
 ```
@@ -142,22 +145,18 @@ from, the WAL's frame format (`wal.md` §3):
 |---|---|---|---|
 | `record_type` | 1 byte | — | Discriminates the payload's logical type; see §4.2. Also used as a structural sanity check: a deserialized edit's own reported type (from its enum tag) must match this byte, or the record is corrupt. |
 | `payload_len` | 4 bytes | little-endian | Length of the following payload. |
-| `payload` | `payload_len` bytes | — | JSON-serialized edit envelope (or fsync marker) — **not** a fixed binary layout; see §4.3. |
-| `crc32` | 4 bytes | little-endian | CRC-32 (**not** CRC32C — see note below) of the payload bytes only. |
+| `payload` | `payload_len` bytes | — | A complete kind-2 binary metadata frame (`metadata.md` §2) containing an edit envelope or fsync marker. |
+| `crc32c` | 4 bytes | big-endian | CRC32C of the complete payload frame, including its inner checksum. |
 
-Note the checksum algorithm difference from the WAL: the manifest journal uses plain
-CRC-32 (the `crc32fast` crate's default, i.e. the classic zlib/gzip/IEEE polynomial),
-while the WAL frame format uses CRC32C (Castagnoli). This is a deliberate
-per-structure difference, not an error in this document: a conforming
-implementation must use CRC-32 here even though it uses CRC32C for the WAL
-(`wal.md` §3) and for SST blocks (`sst.md` §5.2).
-
-`payload_len` is an unsigned 32-bit value, so one record payload is at most
-`u32::MAX` bytes. The format defines no smaller payload limit.
+The outer checksum covers the payload only. The inner metadata frame separately
+checks its magic, kind, length, and MessagePack payload. Both checks are required.
+The inner payload is bounded to 256 MiB; its complete frame adds 17 bytes. The
+outer `payload_len` includes those 17 bytes. FORMAT 8's JSON payload and
+little-endian IEEE CRC-32 are incompatible with this profile.
 
 ### 4.2 Record type registry
 
-The FORMAT 8 journal uses these record types:
+The FORMAT 9 journal uses these record types:
 
 | Value | Meaning |
 |---|---|
@@ -170,16 +169,18 @@ The FORMAT 8 journal uses these record types:
 | 10 | `DropColumnFamilyAt` |
 | 11 | `ReclaimColumnFamily` |
 | 12 | `AdvanceFlushFrontier` |
+| 13 | `CompleteSstDelete` |
+| 14 | `MoveSsts` |
 
 Values 4, 5, and 7 are unsupported in this profile. Any other record type is
 corruption; journal records are not skippable. The `record_type` byte must agree
-with the externally tagged edit variant in the payload. A FORMAT 8 reader must not
-interpret records from an older journal profile as FORMAT 8 edits.
+with the externally tagged edit variant in the payload. A FORMAT 9 reader must not
+interpret records from an older journal profile as FORMAT 9 edits.
 
 ### 4.3 Payload encoding: edit envelopes
 
-An edit or batch payload is a JSON object containing a durable edit id and one
-externally tagged edit:
+The decoded MessagePack payload is a map containing a durable edit id and one
+externally tagged edit (JSON-like notation below describes values, not bytes):
 
 ```jsonc
 {
@@ -189,16 +190,18 @@ externally tagged edit:
 ```
 
 The `edit_id` is a monotonically increasing u64 identity. The `edit` union uses
-variant names as JSON keys. The newtype `AddSst` variant inlines its `FileMeta` object;
-`Batch` contains an ordered array of recursively tagged edits. Every FORMAT 8 journal
+variant names as string map keys. The newtype `AddSst` variant inlines its `FileMeta` object;
+`Batch` contains an ordered array of recursively tagged edits. Every FORMAT 9 journal
 edit must use this envelope; a bare legacy enum without `edit_id` is invalid.
 
-The FORMAT 8 edit variants are:
+The FORMAT 9 edit variants are:
 
 | Variant | Fields | Semantics |
 |---|---|---|
 | `AddSst` | one `FileMeta` (§5.5) | Add one SST identity. Repeating the same identity is idempotent; a conflicting identity for the same name is corruption. |
-| `RemoveSst` | `name: string` | Remove the named SST if present. |
+| `RemoveSst` | `name: string` | Remove the named SST if present and retain its exact metadata in `retired_ssts` pending physical deletion. |
+| `CompleteSstDelete` | `file: FileMeta` | Acknowledge physical deletion or proven absence of this exact retired identity; see §5.8. |
+| `MoveSsts` | `captured: [FileMeta]`, `target_level: u32` | Atomically promote existing immutable identities one level without rewriting or retiring them; see §5.9. |
 | `CreateColumnFamily` | `id: u32`, `name: string`, `created_at: u64` | Create a non-default family. A repeated original create is idempotent; ids are not reused. |
 | `DropColumnFamilyAt` | `id: u32`, `drop_sequence: u64`, `dropped_sst_names: [string]` | Tombstone a family and capture its snapshot frontier and owned SST set. An empty name list is normalized from the family's current files when applied. |
 | `ReclaimColumnFamily` | `id: u32`, `names: [string]` | Remove captured SST names from a dropped family; retain its tombstone. Reclamation can proceed in batches. |
@@ -218,7 +221,7 @@ Conflicting identities, family id reuse, or regressing frontiers are rejected.
 
 ### 4.4 Fsync markers and the durability boundary
 
-Record type 9 is a JSON `FsyncMarker`, not an edit:
+Record type 9 contains a kind-2 frame holding a `FsyncMarker` map, not an edit:
 
 ```jsonc
 { "last_persisted_sequence": <u64>, "ts_millis": <u64> }
@@ -237,7 +240,7 @@ followed by a valid marker. A complete edit at EOF without its marker is not dur
 On load, exactly one of the following supplies the starting (pre-journal-replay)
 manifest state, in this precedence order:
 
-1. **`manifest.snapshot.json`**, if it exists — parsed as the full JSON `Manifest`
+1. **`manifest.snapshot.json`**, if it exists — decoded as a kind-1 binary `Manifest` frame
    structure (§5.5/§5.6 below). This is authoritative whenever present; step 2 is not
    consulted at all if this file exists, even if it disagrees with `manifest.json`.
 2. **`manifest.json`** (the legacy base), if no snapshot exists but this does.
@@ -263,22 +266,20 @@ re-apply them.
 This checkpoint-gated replay — rather than "replay the whole journal every time," or
 "trust that the journal was always truncated exactly at snapshot time" — is what
 makes recovery correct across the specific crash window between "snapshot file
-durably renamed into place" and "journal file durably truncated" (§6.3's
+durably renamed into place" and "journal file durably replaced" (§6.3's
 snapshotting process): if a crash lands in that window, the journal is untruncated
 and still contains edits already reflected in the new snapshot, but replaying only
 edits above the recorded `edit_checkpoint_id` re-derives the same state without
 double-applying them.
 
-If journal replay itself fails (a real, unrecoverable corruption per §6.1, as opposed
-to a tolerated partial tail), the outcome depends on a caller-supplied recovery
-policy: **Strict** propagates the failure and the load fails outright; a permissive
-policy logs a warning and proceeds with the base state alone, silently forgoing any
-edits recorded in the journal since the checkpoint.
+Strict recovery must propagate journal corruption. An explicit salvage operation
+may retain a verified durable prefix while reporting the discarded suffix; it
+must not silently substitute the base state and claim complete recovery.
 
 After base-state loading and journal replay, every `FileMeta.name` and each SST name
 retained by a column-family tombstone is validated as a well-formed persisted SST name
 (§4.3); a validation failure at this point fails the load, even if the underlying
-JSON/journal parsing succeeded.
+binary/journal decoding succeeded.
 
 ### 5.3 Column-family lifecycle
 
@@ -327,17 +328,18 @@ change this persisted flat file-set contract.
 
 Each `FileMeta` entry:
 
-| Field | Type | Required in JSON? | Semantics |
+| Field | Type | Required in decoded map? | Semantics |
 |---|---|---|---|
 | `name` | string | yes | Persisted SST filename; see §4.3's validation rule. Writers commonly use `{cf_id:06}_{level:02}_{sst_seq:020}.sst`, but the manifest contract requires only one safe relative `.sst` filename; the padded naming pattern is not required for reading or identity. |
 | `level` | u32 | yes | LSM level the file belongs to. |
 | `size_bytes` | u64 | yes | File size in bytes. |
-| `content_crc32c` | u32, optional | no | Whole-file CRC32C, when recorded, used to validate the SST's bytes independent of the manifest journal's own CRC-32 (§4.1) — this checksum is over the *referenced SST file's content*, a different algorithm and a different object than the journal record checksum. |
+| `content_crc32c` | u32, optional | no | Whole-file CRC32C, when recorded, used to validate the SST's bytes independent of the manifest journal's own CRC32C (§4.1) — this checksum is over the *referenced SST file's content*, the same algorithm over a different object than the journal record checksum. |
 | `cf_id` | u32 | yes in canonical output; readers default omission to 0 | Owning column-family id. |
 | `sst_seq` | u64 | yes in canonical output; readers default omission to 0 | Per-family sequence number identifying this file's creation order; related to the `next_sst_seqs` counter advanced by `BumpNextSstSeq`. |
-| `smallest_key` / `largest_key` | nullable string | yes in canonical output; readers default omission to null | Inclusive key bounds covered by the file, when known. A present byte string is lowercase hexadecimal with two characters per byte. A missing or null bound is unknown. |
+| `smallest_key` / `largest_key` | nullable binary | yes in canonical output; readers default omission to null | Inclusive key bounds covered by the file, when known. On wire a present bound is a MessagePack binary value. JSON projections use lowercase hexadecimal with two characters per byte. A missing or null bound is unknown. |
 | `smallest_seq` / `largest_seq` | nullable u64 | yes in canonical output; readers default omission to null | Inclusive sequence-number bounds of entries in the file, when known. |
 | `key_bounds_complete` | boolean | yes in canonical output; readers default omission to `false` | Whether the recorded key bounds include every point key and every range-tombstone endpoint in the SST. A reader must treat a file with `false`, a missing field, or incomplete bounds as a candidate for every key-range lookup; it must not use those bounds to prune the file. |
+| `earliest_expiration_millis` | u64, optional | no | Earliest known expiration; absence provides no expiry proof. It must not authorize dropping versions still visible to a snapshot. |
 | `sublevel` | u32 | yes in canonical output; readers default omission to 0 | Sub-ordering within `level`; lower values sort first within the level. |
 
 A read-access counter (`read_count`) exists on the in-memory structure for
@@ -350,14 +352,15 @@ this format document.
 | Field | Type | Requirement | Semantics |
 |---|---|---|---|
 | `flushed_through` | array of `{cf_id, through_sequence}` | Required | Flush authority for every family. Rows are strictly ordered by `cf_id`, begin with the live default family `0`, and contain exactly one row per family. See §5.7. |
+| `retired_ssts` | map `string -> FileMeta` | Omitted when empty; readers default to `{}` | Original immutable identities awaiting confirmed physical deletion; see §5.8. |
 | `files` | `[FileMeta]` | Required in canonical output; readers default omission to `[]` | The flat file set; see §5.4. |
 | `column_families` | `[ColumnFamilyMeta]` | Required in canonical output; readers default omission to `[]` | All non-default column-family records, including tombstones; see §5.3. |
-| `next_sst_seqs` | map `u32 -> u64` | Required in canonical output; readers default omission to `{}` | Per-family next-SST-sequence counters keyed by canonical unpadded decimal `cf_id`. A missing key allocates sequence `0`. |
+| `next_sst_seqs` | map `u32 -> u64` | Required in canonical output; readers default omission to `{}` | Per-family next-SST-sequence counters keyed by unsigned integer `cf_id` on wire (canonical unpadded decimal keys in JSON projections). A missing key allocates sequence `0`. |
 | `edit_checkpoint_id` | u64 | Required in canonical output; readers default omission to `0` | The journal replay horizon this snapshot already reflects; see §5.2. |
 
-The whole `Manifest` structure is serialized as JSON (not a binary format) in the
-snapshot and in a legacy base file when one is being read. FORMAT 8 writers persist
-the full state in the snapshot, not in `manifest.json`. The WAL sequence reservation
+The whole `Manifest` structure is serialized as a named MessagePack map inside a
+kind-1 binary metadata frame in both full-state files (`metadata.md` §2).
+FORMAT 9 writers persist the full state in the snapshot, not in `manifest.json`. The WAL sequence reservation
 and history boundary are persisted in `wal/LEDGER` (`wal.md` §1.1). Cloud retirement
 generations are persisted in the cloud WAL publication catalog (`wal.md` §1.2.1).
 
@@ -390,6 +393,42 @@ lifecycle-inconsistent frontier rather than inventing a default value. When publ
 a newer shared metadata generation, the new frontier set must retain every prior row,
 never lower a live sequence, and never revive a dropped family.
 
+### 5.8 Durable deletion obligations
+
+Removing a live SST, including column-family reclamation, must preserve its
+original `FileMeta` under its name in `retired_ssts`. A checkpoint must retain
+these obligations across restart. The map key must match the stored name and
+an identity must not be simultaneously active and retired. `AddSst` must not
+reuse an identity pending retirement or removed earlier in the same batch.
+
+Physical deletion must wait until readers, snapshots, compaction inputs,
+pending intents and in-flight metadata publications no longer depend on the
+identity. A failed, timed-out or ambiguous deletion must retain the obligation.
+Only confirmed removal or proven absence authorizes `CompleteSstDelete`.
+That edit must reject a live SST or a conflicting retired identity. Repeating
+it after the obligation was removed is a no-op. Remote deletion must be
+conditional on the exact observed object identity.
+
+### 5.9 Logical level moves
+
+`MoveSsts` contains a nonempty, unique set of captured identities from one
+live family and source level. `target_level` must equal source level plus one.
+Every source must have complete, ordered key bounds and a content checksum.
+The current metadata must still match each captured identity, including SST
+sequence, sublevel and expiration metadata. All sources may already be at the
+target level for idempotent replay; a partially reflected move is corruption.
+
+Captured sources must not overlap one another or any target-level SST. A
+non-L0 source must not overlap another SST left at its source level. An L0
+move must not pass older overlapping L0 coverage: every remaining overlapping
+L0 file must have a known `smallest_seq` greater than the captured file's known
+`largest_seq`. Unknown bounds conservatively overlap. Validate the complete
+move before changing state.
+
+Only the logical `level` changes. Filenames, object bytes, checksums, ordering
+metadata and flush frontiers remain intact. A move must neither create output
+objects nor enqueue its sources for deletion.
+
 ## 6. Recovery semantics: corruption and torn tails
 
 ### 6.1 Hard corruption in the journal
@@ -398,31 +437,32 @@ Any of the following, encountered while scanning `manifest.journal`, is corrupti
 and is never silently tolerated as a benign tail (contrast §6.2):
 
 - A `record_type` byte not listed in §4.2.
-- A CRC-32 mismatch between a record's declared checksum and the checksum computed
+- An outer CRC32C mismatch between a record's declared checksum and the checksum computed
   over its actual payload bytes.
-- A record whose JSON payload does not match the FORMAT 8 edit envelope or the
+- A record whose binary payload does not match the FORMAT 9 edit envelope or the
   fsync-marker shape (§4.3–§4.4).
 - A record whose deserialized edit's own reported variant/type does not match the
   `record_type` byte that framed it.
 - An SST name anywhere in a decoded edit that fails persisted-name validation
   (§4.3).
-- Mid-file corruption that precedes an otherwise-valid later record: unlike the
-  "verified-suffix" carve-out in the WAL format (`wal.md` §6.3) that can turn a
-  would-be torn-tail into a hard error by finding recoverable data past it, here the
-  relationship runs the *other* direction — the manifest journal replay simply fails
-  the moment it hits a corrupt record it cannot classify as a genuine end-of-file
-  condition (§6.2), even if bytes that would otherwise re-parse as valid records
-  follow it. There is no scan-ahead/resynchronization mechanism analogous to the
-  WAL's magic-based resync scan.
+- An invalid inner metadata frame, including kind, checksum, extent, nesting
+  or payload-shape failure.
+- An outer length that overruns EOF but would swallow a later complete,
+  checksum-valid fsync marker. This is interior corruption, not proof that the
+  remaining bytes were an interrupted final append. Readers must check for
+  such a verified marker before discarding an overrun as a torn tail; this is
+  not permission to resynchronize and silently skip corrupt history.
 
 ### 6.2 Tolerated incomplete tail vs. required repair
 
 Two distinct "the journal ends abruptly" situations are handled differently:
 
-1. **Partial record at EOF** (not enough bytes remain to read a declared header, or
+1. **Partial record at EOF** (not enough bytes remain to read a valid-type header, or
    the declared `payload_len` + trailing CRC would run past the file's actual
    length): this is treated as an ordinary consequence of a crash mid-append and is
-   **not** an error. Replay stops at the last position it could fully verify.
+   **not** an error, provided it does not hide a verified later marker (§6.1).
+   Replay stops at the last position it could fully verify. An all-zero EOF
+   suffix is also a torn tail; zero padding followed by nonzero data is corrupt.
 2. **A fully-formed, CRC-valid edit record present at EOF with no following fsync
    marker record** (§4.4): even though the edit record itself parses and checksums
    correctly, it is excluded from the replayed edit set, because the fsync marker is
@@ -443,24 +483,25 @@ expecting a clean tail).
 
 ### 6.3 Snapshot/journal crash-consistency window
 
-Publishing a new snapshot is itself a multi-step process (detailed as policy in §7,
-but with format-relevant consistency implications here):
+Publishing a new snapshot may encode a captured state while newer edits append.
+The checkpoint must preserve that captured state's exact durable edit horizon:
 
-1. Merge the journal's post-checkpoint edits into a full manifest state.
-2. Write that merged state to `manifest.snapshot.json.tmp`, then atomically rename
-   it to `manifest.snapshot.json`.
-3. Truncate `manifest.journal` to empty.
+1. Capture a consistent manifest and its `edit_checkpoint_id`.
+2. Before installation, serialize against journal writers and validate the cut
+   against durable authority. A cut beyond durable history is invalid. A newer
+   installed checkpoint must not be replaced by an older capture.
+3. Durably stage and rename the captured bytes into `manifest.snapshot.json`.
+4. Atomically retain every durable journal edit and marker above the captured
+   horizon. The journal becomes empty only if no newer durable edits exist.
 
-A crash between steps 2 and 3 leaves a durable snapshot **and** an untruncated
-journal whose already-merged edits are still physically present. This is exactly the
-scenario §5.2's checkpoint-gated replay is designed to make harmless: the new
-snapshot's `edit_checkpoint_id` already reflects those edits, so replay skips them
-even though their bytes remain on disk; a subsequent successful checkpoint operation
-truncates the journal for real. A crash before step 2's rename completes leaves the
-old snapshot (or no snapshot) and the full journal intact — ordinary §5.1/§5.2
-recovery applies unmodified. The checkpoint writer must preserve the journal edits represented by the snapshot
-checkpoint it publishes; stale or competing writers must be fenced or serialized so a
-lower checkpoint cannot discard newer durable edits.
+A crash after snapshot rename but before journal replacement leaves replayable
+old records. Checkpoint-gated replay (§5.2) skips those covered by the snapshot
+and applies the newer durable suffix exactly once. A crash before rename leaves
+the old snapshot and journal authoritative. A delayed checkpoint must never
+truncate newer acknowledged edits or claim a horizon its encoded state lacks.
+Appending, installing checkpoints and repairing the journal must share the
+serialization needed to preserve these invariants; encoding may happen outside
+that critical section.
 
 ## 7. Format vs. policy
 
@@ -503,13 +544,13 @@ correctly implement §2–§6:
 
 **Settled:**
 
-- `ManifestEdit`'s tagged-union JSON shape is externally tagged
+- `ManifestEdit`'s tagged-union map shape is externally tagged
   (`{"VariantName": <fields>}`); see §4.3, which states the exact shape an
   implementation must reproduce.
-- FORMAT 8 does not define the older `DropColumnFamily` journal variant. Only
+- FORMAT 9 does not define the older `DropColumnFamily` journal variant. Only
   `DropColumnFamilyAt` records a family drop.
-- FORMAT 8 readers may use `manifest.json` only as a base when no snapshot exists;
-  FORMAT 8 writers do not write or synchronize this legacy file. See §1.1 and §5.1.
+- FORMAT 9 readers may use `manifest.json` only as a base when no snapshot exists;
+  FORMAT 9 writers do not write or synchronize this legacy file. See §1.1 and §5.1.
 
 **Open questions:**
 

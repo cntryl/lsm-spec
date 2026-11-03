@@ -1,0 +1,95 @@
+{
+  "source": {
+    "repository": "https://github.com/cntryl/midge",
+    "commit": "c684310d9d8ce8ecd1151c47151d4bea98b348cf",
+    "version": "0.5.2 main",
+    "paths": [
+      "tests/fixtures/compatibility/v9_empty_db",
+      "tests/fixtures/compatibility/v9_populated_v5_sst_db"
+    ]
+  },
+  "binary_fixtures": [
+    {
+      "path": "empty-local",
+      "classification": "reader-compatibility",
+      "format_version": 9,
+      "reader_expected": "accept"
+    },
+    {
+      "path": "populated-local",
+      "classification": "reader-compatibility",
+      "format_version": 9,
+      "sst_version": 5,
+      "reader_expected": "accept",
+      "expected_values": {
+        "fixture/alpha": "value-alpha"
+      }
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "manifest-retired-sst",
+      "path": "valid/manifest-retired-sst.json",
+      "schema": "../../../schema/manifest.schema.json",
+      "references": [],
+      "expected": "accept"
+    },
+    {
+      "id": "manifest-retired-unsafe-name",
+      "path": "invalid/manifest-retired-unsafe-name.json",
+      "schema": "../../../schema/manifest.schema.json",
+      "references": [],
+      "expected": "reject"
+    },
+    {
+      "id": "complete-sst-delete",
+      "path": "valid/complete-sst-delete.json",
+      "schema": "../../../schema/manifest-edit.schema.json",
+      "references": [
+        "../../../schema/manifest.schema.json"
+      ],
+      "expected": "accept"
+    },
+    {
+      "id": "complete-sst-delete-missing-identity",
+      "path": "invalid/complete-sst-delete-missing-identity.json",
+      "schema": "../../../schema/manifest-edit.schema.json",
+      "references": [
+        "../../../schema/manifest.schema.json"
+      ],
+      "expected": "reject"
+    },
+    {
+      "id": "move-ssts",
+      "path": "valid/move-ssts.json",
+      "schema": "../../../schema/manifest-edit.schema.json",
+      "references": [
+        "../../../schema/manifest.schema.json"
+      ],
+      "expected": "accept"
+    },
+    {
+      "id": "move-ssts-empty",
+      "path": "invalid/move-ssts-empty.json",
+      "schema": "../../../schema/manifest-edit.schema.json",
+      "references": [
+        "../../../schema/manifest.schema.json"
+      ],
+      "expected": "reject"
+    },
+    {
+      "id": "sst-v5-projection",
+      "path": "valid/sst-v5-projection.json",
+      "schema": "../../../schema/sst.schema.json",
+      "references": [],
+      "expected": "accept"
+    },
+    {
+      "id": "sst-v4-projection",
+      "path": "invalid/sst-v4-projection.json",
+      "schema": "../../../schema/sst.schema.json",
+      "references": [],
+      "expected": "reject"
+    }
+  ]
+}

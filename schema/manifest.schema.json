@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/cntryl/lsm-spec/schema/manifest.schema.json",
   "title": "Manifest",
-  "description": "FORMAT 8 JSON shape for manifest.snapshot.json and the read-only legacy manifest.json fallback. Reader defaults and cross-field checks are specified in format/manifest.md §§5.3-5.7.",
+  "description": "Decoded JSON projection of FORMAT 9 binary manifests; also accepts the historical FORMAT 8 JSON fields. Wire key bounds are binary and allocator keys are integers; projections use hex strings and decimal keys. See format/metadata.md and format/manifest.md.",
   "$defs": {
     "u32": {
       "type": "integer",
@@ -102,6 +102,10 @@
         "sublevel": {
           "$ref": "#/$defs/u32",
           "default": 0
+        },
+        "earliest_expiration_millis": {
+          "$ref": "#/$defs/u64",
+          "description": "Earliest known TTL expiry; omitted when unknown."
         }
       }
     },
@@ -263,7 +267,18 @@
     },
     "edit_checkpoint_id": {
       "$ref": "#/$defs/u64"
+    },
+    "retired_ssts": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/sstName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/fileMeta"
+      },
+      "default": {},
+      "$comment": "Map key must equal FileMeta.name; active and retired sets must be disjoint. Readers check these cross-field constraints."
     }
   },
-  "$comment": "FORMAT 8 readers apply serde defaults to omitted fields; canonical writer output includes defaulted manifest and file fields. Cross-field lifecycle and frontier rules are checked by the reader and conformance harness."
+  "$comment": "Reader defaults apply to omitted fields; canonical output includes defaulted fields except empty retired_ssts. Binary framing, map key types, identity agreement, lifecycle and frontier checks are outside this projection."
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/cntryl/lsm-spec/schema/manifest-edit.schema.json",
   "title": "ManifestJournalPayload",
-  "description": "JSON payload of one FORMAT 8 manifest journal edit, batch, or fsync marker. The record type byte and framing are specified in format/manifest.md §4.1-§4.4.",
+  "description": "Decoded JSON projection of a FORMAT 9 kind-2 binary manifest journal payload. See format/metadata.md and format/manifest.md \u00a7\u00a74.1\u20134.4.",
   "$defs": {
     "u32": {
       "type": "integer",
@@ -211,6 +211,56 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/edit"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "CompleteSstDelete"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "CompleteSstDelete": {
+              "type": "object",
+              "required": [
+                "file"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "file": {
+                  "$ref": "manifest.schema.json#/$defs/fileMeta"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "MoveSsts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "MoveSsts": {
+              "type": "object",
+              "required": [
+                "captured",
+                "target_level"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "captured": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "manifest.schema.json#/$defs/fileMeta"
+                  }
+                },
+                "target_level": {
+                  "$ref": "#/$defs/u32"
+                }
               }
             }
           }

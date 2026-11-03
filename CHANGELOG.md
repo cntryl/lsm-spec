@@ -3,6 +3,30 @@
 ## [Unreleased] — 1.0.0-dev
 
 ### Breaking
+- Advance the draft profile from FORMAT 8 to FORMAT 9, reconstructing the
+  persisted contracts checked against Midge 0.5.2 main. This is a deliberate
+  pre-1.0 incompatibility: logical export/import is required, with no in-place
+  upgrade or binary rollback. Historical fixtures remain compatibility evidence.
+- Specify bounded MessagePack metadata frames, big-endian CRC32C, binary
+  manifest snapshots/journal payloads, and chained append-only intent edits.
+- Require SST V5 compact varint entries, independent restart directories and
+  validated continued-key bits. Reject unsupported Merge entries and corrupt
+  value-bearing deletes instead of exposing unresolved data as values.
+- Specify cloud metadata layout v2, separate committed pointer, lease v4 and
+  sentinel v3, immutable version closures, exact cut proofs and DDL registry v2.
+
+### Added in the FORMAT 9 amendment
+- Durable retired-SST identities, deletion acknowledgements and logical level
+  moves, with synchronized manifest/edit schemas and accepted/rejected examples.
+- Empty and populated FORMAT 9/SST V5 compatibility fixtures copied unchanged
+  from the reference repository, with exact source provenance.
+- Recovery authority, takeover fencing, dependency retention, ambiguous DDL and
+  equal-sequence duplicate requirements. Bloom sizing and reader allocation
+  changes remain policy and do not change wire versions.
+
+The earlier entries below describe the historical FORMAT 8 amendment.
+
+### Earlier breaking changes
 - Replace the earlier draft FORMAT 3 manifest/WAL assumptions with the FORMAT 8
   profile: manifest journal envelopes and flush frontiers, local WAL ledger and
   linked segments, SST V4, and cloud WAL catalog v3.

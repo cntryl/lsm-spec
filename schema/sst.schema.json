@@ -18,7 +18,7 @@
       "required": ["entry_type", "sequence", "key"],
       "additionalProperties": false,
       "properties": {
-        "entry_type": { "type": "string", "enum": ["Put", "Insert", "Delete"], "$comment": "Merge is RESERVED (sst.md \u00a73.2): readers must decode it, but this writer-output fixture schema rejects it." },
+        "entry_type": { "type": "string", "enum": ["Put", "Insert", "Delete"], "$comment": "Merge is unsupported (sst.md §3.2): readers reject it as incompatible." },
         "sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
         "key": { "type": "string", "contentEncoding": "base64" },
         "value": { "type": "string", "contentEncoding": "base64", "description": "Absent for a Delete entry with value_len == 0; see sst.md §3.4." },
@@ -30,7 +30,7 @@
           "then": { "required": ["value"] }
         },
         {
-          "$comment": "A value-bearing Delete is RESERVED (sst.md \u00a73.4): decodable, but never emitted by a conforming writer.",
+          "$comment": "A value-bearing Delete is corrupt (sst.md §3.2).",
           "if": { "properties": { "entry_type": { "const": "Delete" } }, "required": ["entry_type"] },
           "then": { "not": { "required": ["value"] } }
         }
@@ -60,7 +60,7 @@
         "index_handle": { "$ref": "#/$defs/blockHandle" },
         "trie_handle": { "$ref": "#/$defs/blockHandle" },
         "block_bloom_handle": { "$ref": "#/$defs/blockHandle" },
-        "format_version": { "const": 4 },
+        "format_version": { "const": 5 },
         "footer_size": { "const": 84 },
         "magic": { "const": "0xDB47_7524_8B80_FB57" }
       }
@@ -70,7 +70,7 @@
       "required": ["format_version", "index_kind"],
       "additionalProperties": false,
       "properties": {
-        "format_version": { "const": 4 },
+        "format_version": { "const": 5 },
         "index_kind": { "type": "string", "enum": ["Sparse", "Trie"] },
         "range_tombstone_handle": { "$ref": "#/$defs/blockHandle" },
         "smallest_key": { "type": "string", "contentEncoding": "base64" },
